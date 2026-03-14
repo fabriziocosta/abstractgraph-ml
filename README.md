@@ -41,6 +41,9 @@ See [ECOSYSTEM.md](ECOSYSTEM.md) for the dependency graph and install order.
 
 - `notebooks/examples/` contains copied ML-facing notebooks updated to the
   split package names.
+- Example notebooks now bootstrap their imports and working directory
+  automatically for the standard ecosystem layout, so they can be launched
+  from the repo root, the notebook directory, or the workspace root.
 
 ## Dependency
 
