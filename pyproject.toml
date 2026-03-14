@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abstractgraph-ml"
+version = "0.1.0"
+description = "ML-oriented AbstractGraph estimators, neural models, importance, feasibility, and top-k tooling."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "abstractgraph>=0.1.0",
+  "numpy>=1.24",
+  "scikit-learn>=1.3",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
