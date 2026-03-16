@@ -27,6 +27,7 @@ This repo owns:
 
 ## Related docs
 
+- [GRAPH_ESTIMATOR.md](GRAPH_ESTIMATOR.md)
 - [FEASIBILITY.md](FEASIBILITY.md)
 
 ## Dependencies
