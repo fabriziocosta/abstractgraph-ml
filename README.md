@@ -35,6 +35,7 @@ See [ECOSYSTEM.md](ECOSYSTEM.md) for the dependency graph and install order.
 ## Documentation
 
 - [docs/README.md](docs/README.md)
+- [docs/FEASIBILITY.md](docs/FEASIBILITY.md)
 - [ECOSYSTEM.md](ECOSYSTEM.md)
 
 ## Notebooks

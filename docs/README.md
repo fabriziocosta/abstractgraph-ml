@@ -25,6 +25,10 @@ This repo owns:
 - `abstractgraph_ml.topk`
   top-k operator/feature selection workflows
 
+## Related docs
+
+- [FEASIBILITY.md](FEASIBILITY.md)
+
 ## Dependencies
 
 - `abstractgraph`
