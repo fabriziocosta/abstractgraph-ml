@@ -8,9 +8,10 @@ Overview
   neural modeling (adapters + encoder + head).
 
 AbstractGraph to tensors
-- An AbstractGraph pairs a preimage graph with an image graph whose nodes carry
-  labels and associations (subgraphs of the preimage). Decomposition operators
-  build the image graph; hashing converts labels into a fixed feature space.
+- An AbstractGraph pairs a base graph with an interpretation graph whose nodes
+  carry labels and mapped subgraphs (subgraphs of the base graph). Decomposition
+  operators build the interpretation graph; hashing converts labels into a fixed
+  feature space.
 - The node vectorizer (`AbstractGraphNodeTransformer`) produces one dense matrix
   per graph with shape [n_nodes, n_features]. By convention:
   - Column 0 is a bias/“node exists” indicator (pooling yields node count).
@@ -46,12 +47,12 @@ Training APIs
   Trains encoder + head jointly with AdamW, optional validation split, and early
   stopping on "val_loss" or task-specific metric ("val_acc" / "val_mse").
 - `pre_train(graphs, decomposition_function, nbits)`: unsupervised pre-training
-  of the encoder using a motif-level prototype InfoNCE objective over image-node
-  associations (motifs). Only the encoder parameters are optimized; the head is
+  of the encoder using a motif-level prototype InfoNCE objective over interpretation-node
+  mapped subgraphs (motifs). Only the encoder parameters are optimized; the head is
   not used and is reported as 0 trainables.
   Decoupled decomposition: The `decomposition_function` here is used solely to
   build an AbstractGraph per input graph in order to extract motif assignments
-  (image-node labels and the indices of their associated preimage nodes). These
+  (interpretation-node labels and the indices of their mapped base nodes). These
   assignments define the contrastive task (prototype per motif label). The node
   features fed to the encoder still come from the estimator's configured
   `node_vectorizer`; they do not depend on this pre-train decomposition. This
@@ -1142,18 +1143,18 @@ class NeuralGraphEstimator:
 
     def _extract_motif_assignments(self, abstract_graph: AbstractGraph) -> List[Tuple[int, List[int]]]:
         """
-        Map image node labels to their associated preimage node indices.
+        Map interpretation-node labels to their mapped base-node indices.
 
         Args:
-            abstract_graph: AbstractGraph instance with labeled image nodes.
+            abstract_graph: AbstractGraph instance with labeled interpretation nodes.
 
         Returns:
-            List of (label, node_indices) pairs for each image node.
+            List of (label, node_indices) pairs for each interpretation node.
         """
-        base_nodes = list(abstract_graph.preimage_graph.nodes())
+        base_nodes = list(abstract_graph.base_graph.nodes())
         node_index = {node_id: i for i, node_id in enumerate(base_nodes)}
         motifs: List[Tuple[int, List[int]]] = []
-        for _, data in abstract_graph.image_graph.nodes(data=True):
+        for _, data in abstract_graph.interpretation_graph.nodes(data=True):
             label = data.get("label", None)
             if label is None:
                 continue
@@ -1161,10 +1162,10 @@ class NeuralGraphEstimator:
                 label_int = int(label)
             except (TypeError, ValueError):
                 continue
-            association = data.get("association", None)
-            if association is None:
+            mapped_subgraph = data.get("mapped_subgraph", data.get("association"))
+            if mapped_subgraph is None:
                 continue
-            idxs = [node_index[n] for n in association.nodes() if n in node_index]
+            idxs = [node_index[n] for n in mapped_subgraph.nodes() if n in node_index]
             if idxs:
                 motifs.append((label_int, idxs))
         return motifs
@@ -1338,8 +1339,8 @@ class NeuralGraphEstimator:
 
         Args:
             graphs: Sequence of input graphs.
-            decomposition_function: AbstractGraph decomposition function to build image nodes.
-            nbits: Hash bit width for image node labels.
+            decomposition_function: AbstractGraph decomposition function to build interpretation nodes.
+            nbits: Hash bit width for interpretation-node labels.
             n_jobs: Number of workers for AbstractGraph construction.
 
         Returns:

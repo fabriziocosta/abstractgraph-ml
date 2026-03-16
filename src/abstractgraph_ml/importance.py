@@ -30,18 +30,18 @@ def annotate_graph_node_saliency(
 
     The procedure is:
     1) Decompose the input graph with the estimator's transformer and apply the
-       label function to image nodes.
+       label function to interpretation nodes.
     2) Fetch the ranked feature ids from the estimator and convert ranks into
        linear scores in (0, 1], assigning higher scores to earlier ranks.
-    3) For each preimage node, aggregate the scores of associated image nodes
+    3) For each base node, aggregate the scores of mapped interpretation nodes
        according to ``node_agg``.
-    4) For each preimage edge, aggregate the endpoint scores according to
+    4) For each base edge, aggregate the endpoint scores according to
        ``edge_stat``.
 
     Args:
         graph: Input graph to annotate.
         graph_estimator: Fitted graph estimator used to rank features.
-        node_agg: Aggregation strategy over image nodes ("max", "mean", "sum").
+        node_agg: Aggregation strategy over interpretation nodes ("max", "mean", "sum").
         edge_stat: Edge aggregation ("mean", "min", "max").
 
     Returns:
@@ -58,16 +58,16 @@ def annotate_graph_node_saliency(
     ag = AbstractGraph(
         graph=graph, label_function=graph_hash_label_function_factory(nbits)
     )
-    ag.create_default_image_node()
+    ag.create_default_interpretation_node()
     ag = decomposition_function(ag)
     ag.apply_label_function()
 
-    inverse: Mapping[Any, set] = {node: set() for node in ag.preimage_graph.nodes()}
-    for img_id, data in ag.image_graph.nodes(data=True):
-        assoc = data.get("association")
-        if assoc is None:
+    inverse: Mapping[Any, set] = {node: set() for node in ag.base_graph.nodes()}
+    for img_id, data in ag.interpretation_graph.nodes(data=True):
+        mapped_subgraph = data.get("mapped_subgraph", data.get("association"))
+        if mapped_subgraph is None:
             continue
-        for pre_id in assoc.nodes():
+        for pre_id in mapped_subgraph.nodes():
             if pre_id in inverse:
                 inverse[pre_id].add(img_id)
 
@@ -81,11 +81,11 @@ def annotate_graph_node_saliency(
     else:
         score_map = {}
 
-    node_score = {node: 0.0 for node in ag.preimage_graph.nodes()}
+    node_score = {node: 0.0 for node in ag.base_graph.nodes()}
     for node, img_ids in inverse.items():
         vals = []
         for img_id in img_ids:
-            lbl = ag.image_graph.nodes[img_id].get("label")
+            lbl = ag.interpretation_graph.nodes[img_id].get("label")
             if lbl in score_map:
                 vals.append(score_map[lbl])
         if not vals:
@@ -99,7 +99,7 @@ def annotate_graph_node_saliency(
                 node_score[node] = float(np.max(vals))
 
     edge_scores: dict[Tuple[Any, Any], float] = {}
-    for u, v in ag.preimage_graph.edges():
+    for u, v in ag.base_graph.edges():
         a, b = node_score.get(u, 0.0), node_score.get(v, 0.0)
         if edge_stat == "min":
             s = min(a, b)
@@ -218,7 +218,7 @@ def plot_graph_node_saliency_with_estimator(
     graph: nx.Graph,
     graph_estimator: "GraphEstimator",
     *,
-    node_agg: str = "max", #node_agg: Aggregation strategy over image nodes ("max", "mean", "sum").
+    node_agg: str = "max", #node_agg: Aggregation strategy over interpretation nodes ("max", "mean", "sum").
     edge_stat: str = "mean", #edge_stat: Edge aggregation ("mean", "min", "max").
     cmap: str = "YlOrRd",
     color_value_range: Tuple[float, float] = (0.25, 1.0),
@@ -233,7 +233,7 @@ def plot_graph_node_saliency_with_estimator(
     Args:
         graph: Input graph to annotate and plot.
         graph_estimator: Fitted graph estimator used to rank features.
-        node_agg: Aggregation strategy over image nodes ("max", "mean", "sum").
+        node_agg: Aggregation strategy over interpretation nodes ("max", "mean", "sum").
         edge_stat: Edge aggregation ("mean", "min", "max").
         cmap: Matplotlib colormap name.
         color_value_range: Range of normalized color values to use.
