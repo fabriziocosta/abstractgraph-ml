@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import networkx as nx
+import numpy as np
 
 from abstractgraph_ml.feasibility import FeasibilityEstimator
 
@@ -16,6 +17,17 @@ class _RecordingEstimator:
     def predict(self, graphs):
         self.calls.append(len(graphs))
         return self.predictions[: len(graphs)]
+
+
+class _ViolationEstimator:
+    def __init__(self, violations):
+        self._violations = np.asarray(violations)
+
+    def fit(self, graphs):
+        return self
+
+    def number_of_violations(self, graphs):
+        return self._violations[: len(graphs)]
 
 
 def _make_graphs(n):
@@ -53,3 +65,26 @@ def test_feasibility_predict_stops_when_no_graphs_survive():
     assert preds.tolist() == [False, False, False]
     assert first.calls == [3]
     assert second.calls == []
+
+
+def test_feasibility_violations_returns_per_estimator_matrix():
+    graphs = _make_graphs(3)
+    first = _ViolationEstimator([0, 1, 2])
+    second = _ViolationEstimator([3, 4, 5])
+    estimator = FeasibilityEstimator([first, second])
+
+    preds = estimator.violations(graphs)
+
+    assert preds.shape == (3, 2)
+    assert preds.tolist() == [[0, 3], [1, 4], [2, 5]]
+
+
+def test_feasibility_number_of_violations_sums_violation_matrix():
+    graphs = _make_graphs(3)
+    first = _ViolationEstimator([0, 1, 2])
+    second = _ViolationEstimator([3, 4, 5])
+    estimator = FeasibilityEstimator([first, second])
+
+    preds = estimator.number_of_violations(graphs)
+
+    assert preds.tolist() == [3, 5, 7]

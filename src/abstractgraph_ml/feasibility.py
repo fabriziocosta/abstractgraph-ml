@@ -6,6 +6,14 @@ import networkx as nx
 from abstractgraph.vectorize import AbstractGraphTransformer
 
 def label_attribute_is_present(graph):
+    """Check whether all nodes and edges carry a ``label`` attribute.
+
+    Args:
+        graph: NetworkX graph to inspect.
+
+    Returns:
+        bool: ``True`` when every node and edge has a ``label`` attribute.
+    """
     for u in graph.nodes():
         if 'label' not in graph.nodes[u]:
             return False
@@ -15,9 +23,23 @@ def label_attribute_is_present(graph):
     return True
 
 def filter_graphs_without_node_and_edge_label_attribute(graphs):
+    """Keep only graphs that have node and edge labels.
+
+    Args:
+        graphs: Iterable of NetworkX graphs.
+
+    Returns:
+        list: Graphs for which :func:`label_attribute_is_present` is ``True``.
+    """
     return [graph for graph in graphs if label_attribute_is_present(graph)]
 
 class FeasibilityEstimatorFromBooleanFunction(object):
+    """Wrap a graph-level boolean function as a feasibility estimator.
+
+    Args:
+        boolean_function: Callable taking a graph and returning a boolean-like
+            feasibility decision.
+    """
     def __init__(self, boolean_function):
         self.boolean_function = boolean_function
 
@@ -27,26 +49,71 @@ class FeasibilityEstimatorFromBooleanFunction(object):
         return '%s(%s)'%(self.__class__.__name__, infos)
 
     def fit(self, graphs):
+        """Return the estimator unchanged.
+
+        Args:
+            graphs: Training graphs.
+
+        Returns:
+            FeasibilityEstimatorFromBooleanFunction: The fitted estimator.
+        """
         return self
 
     def number_of_violations(self, graphs):
+        """Return per-graph violation counts.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Integer array with one entry per graph.
+        """
         preds = np.array([self.boolean_function(graph) for graph in graphs]).astype(int)
         return preds
 
     def predict(self, graphs):
+        """Predict feasibility for each graph.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Boolean feasibility predictions.
+        """
         preds = np.array([self.boolean_function(graph) for graph in graphs])
         return preds
 
 
 def FeasibilityEstimatorHasNodeAndEdgeLabelAttribute():
+    """Build a feasibility estimator enforcing node and edge labels.
+
+    Returns:
+        FeasibilityEstimatorFromBooleanFunction: Label-presence estimator.
+    """
     return FeasibilityEstimatorFromBooleanFunction(boolean_function=label_attribute_is_present)
 
 
 def FeasibilityEstimatorHasNoSelfLoops():
+    """Build a feasibility estimator forbidding self-loops.
+
+    Returns:
+        FeasibilityEstimatorFromBooleanFunction: Self-loop feasibility
+        estimator.
+    """
     return FeasibilityEstimatorFromBooleanFunction(boolean_function=lambda graph:nx.number_of_selfloops(graph)==0)
 
 
 def FeasibilityEstimatorNumberOfNodesInRange(min_size=1, max_size=None):
+    """Build a node-count feasibility estimator with fixed bounds.
+
+    Args:
+        min_size: Minimum allowed number of nodes.
+        max_size: Optional maximum allowed number of nodes.
+
+    Returns:
+        FeasibilityEstimatorFromBooleanFunction: Node-count feasibility
+        estimator.
+    """
     def is_n_nodes_in_range(graph):
         number_of_nodes = nx.number_of_nodes(graph)
         if max_size is None: return number_of_nodes >= min_size
@@ -56,6 +123,16 @@ def FeasibilityEstimatorNumberOfNodesInRange(min_size=1, max_size=None):
 
 
 def FeasibilityEstimatorNumberOfEdgesInRange(min_size=1, max_size=None):
+    """Build an edge-count feasibility estimator with fixed bounds.
+
+    Args:
+        min_size: Minimum allowed number of edges.
+        max_size: Optional maximum allowed number of edges.
+
+    Returns:
+        FeasibilityEstimatorFromBooleanFunction: Edge-count feasibility
+        estimator.
+    """
     def is_n_edges_in_range(graph):
         number_of_edges = nx.number_of_edges(graph)
         if max_size is None: return number_of_edges >= min_size
@@ -98,6 +175,12 @@ def FeasibilityEstimatorNumberOfEdgesInObservedRange(quantile=None):
     )
 
 class WithinRangeFeasibilityEstimatorFromNumericalFunction(object):
+    """Learn an admissible numerical range from training graphs.
+
+    Args:
+        numerical_function: Callable mapping a graph to a numeric summary.
+        quantile: Optional symmetric trimming quantile used to learn bounds.
+    """
     def __init__(self, numerical_function, quantile=None):
         self.numerical_function = numerical_function
         self.quantile = quantile
@@ -108,6 +191,15 @@ class WithinRangeFeasibilityEstimatorFromNumericalFunction(object):
         return '%s(%s)'%(self.__class__.__name__, infos)
 
     def fit(self, graphs):
+        """Learn lower and upper bounds from training graphs.
+
+        Args:
+            graphs: Training graphs.
+
+        Returns:
+            WithinRangeFeasibilityEstimatorFromNumericalFunction: The fitted
+            estimator.
+        """
         vals = np.array([self.numerical_function(graph) for graph in graphs])
         if self.quantile is None:
             self.min = np.min(vals)
@@ -118,11 +210,28 @@ class WithinRangeFeasibilityEstimatorFromNumericalFunction(object):
         return self
 
     def is_feasible(self, graph):
+        """Check whether a graph stays within the learned range.
+
+        Args:
+            graph: Graph to evaluate.
+
+        Returns:
+            bool: ``True`` when the graph value is within the learned bounds.
+        """
         val = self.numerical_function(graph)
         test = val >= self.min and val <= self.max 
         return test
 
     def size_of_violation(self, graph):
+        """Measure how far a graph lies outside the learned range.
+
+        Args:
+            graph: Graph to evaluate.
+
+        Returns:
+            float: Distance from the nearest valid boundary, or ``0`` when the
+            graph is feasible.
+        """
         val = self.numerical_function(graph)
         if val <= self.min: 
             return self.min - val 
@@ -132,15 +241,36 @@ class WithinRangeFeasibilityEstimatorFromNumericalFunction(object):
             return 0
 
     def number_of_violations(self, graphs):
+        """Return per-graph violation magnitudes.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Integer violation magnitudes.
+        """
         preds = np.array([self.size_of_violation(graph) for graph in graphs]).astype(int)
         return preds
 
     def predict(self, graphs):
+        """Predict feasibility for each graph.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Boolean feasibility predictions.
+        """
         preds = np.array([self.is_feasible(graph) for graph in graphs])
         return preds
 
 
 class FeasibilityEstimatorIsConnected(object):
+    """Require a specific number of connected components.
+
+    Args:
+        number_connected_components: Required number of connected components.
+    """
     def __init__(self, number_connected_components=1):
         self.number_connected_components = number_connected_components
 
@@ -150,18 +280,52 @@ class FeasibilityEstimatorIsConnected(object):
         return '%s(%s)'%(self.__class__.__name__, infos)
 
     def fit(self, graphs):
+        """Return the estimator unchanged.
+
+        Args:
+            graphs: Training graphs.
+
+        Returns:
+            FeasibilityEstimatorIsConnected: The fitted estimator.
+        """
         return self
 
     def number_of_violations(self, graphs):
+        """Return excess connected components for each graph.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Integer violation counts.
+        """
         preds = np.array([nx.number_connected_components(graph)-1 for graph in graphs])
         return preds
 
     def predict(self, graphs):
+        """Predict connectivity feasibility for each graph.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Boolean feasibility predictions.
+        """
         preds = np.array([nx.number_connected_components(graph)==self.number_connected_components for graph in graphs])
         return preds
 
 
 class FeasibilityEstimatorFeatureMustExist(object):
+    """Require features that are always present in the training set.
+
+    Args:
+        decomposition_function: Optional graph decomposition applied before
+            vectorization.
+        nbits: Hash width used by the vectorizer.
+        parallel: Whether vectorization should use parallel workers by
+            default.
+        n_jobs: Optional explicit worker count overriding ``parallel``.
+    """
     def __init__(self, decomposition_function=None, nbits=14, parallel=True, n_jobs=None):
         self.decomposition_function = decomposition_function
         self.nbits = nbits
@@ -170,10 +334,14 @@ class FeasibilityEstimatorFeatureMustExist(object):
         self.n_jobs = n_jobs
 
     def transform(self, graphs):
-        """
-        Convert a list of NetworkX graphs to a CSR feature matrix using the
-        new QuotientGraph pipeline.  Remains sparse so downstream .dot() and
-        .A calls behave exactly like before.
+        """Vectorize graphs into a sparse feature matrix.
+
+        Args:
+            graphs: Graphs to transform.
+
+        Returns:
+            scipy.sparse.csr_matrix: Sparse feature matrix with one row per
+            graph.
         """
         # Allow explicit worker control while preserving the old parallel flag.
         n_jobs = self.n_jobs if self.n_jobs is not None else (-1 if self.parallel else 1)
@@ -195,6 +363,14 @@ class FeasibilityEstimatorFeatureMustExist(object):
         return '%s(%s)'%(self.__class__.__name__, infos)
 
     def fit(self, graphs):
+        """Learn which features must always exist.
+
+        Args:
+            graphs: Training graphs.
+
+        Returns:
+            FeasibilityEstimatorFeatureMustExist: The fitted estimator.
+        """
         data_mtx = self.transform(graphs).astype(bool)
         n_instances, n_features = data_mtx.shape
         # find all features that are always present
@@ -203,12 +379,28 @@ class FeasibilityEstimatorFeatureMustExist(object):
         return self
 
     def number_of_violations(self, graphs):
+        """Count missing mandatory features for each graph.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Integer violation counts.
+        """
         assert self.must_exist_features_vec is not None, 'FeasibilityEstimatorFeatureMustExist is not fit'
         data_mtx = self.transform(graphs)
         preds = data_mtx.dot(self.must_exist_features_vec.astype(int))
         return preds
 
     def predict(self, graphs):
+        """Predict whether each graph contains all mandatory features.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Boolean feasibility predictions.
+        """
         assert self.must_exist_features_vec is not None, 'FeasibilityEstimatorFeatureMustExist is not fit'
         data_mtx = self.transform(graphs).astype(bool)
         preds = data_mtx.dot(self.must_exist_features_vec)
@@ -216,6 +408,17 @@ class FeasibilityEstimatorFeatureMustExist(object):
 
 
 class FeasibilityEstimatorFeatureCannotExist(object):
+    """Forbid features that never appear in the training set.
+
+    Args:
+        decomposition_function: Optional graph decomposition applied before
+            vectorization.
+        nbits: Hash width used by the vectorizer.
+        parallel: Whether vectorization should use parallel workers by
+            default.
+        backend: Joblib backend passed to the vectorizer.
+        n_jobs: Optional explicit worker count overriding ``parallel``.
+    """
     def __init__(self, decomposition_function=None, nbits=14, parallel=True, backend="threading", n_jobs=None):
         self.decomposition_function = decomposition_function
         self.nbits = nbits
@@ -230,10 +433,14 @@ class FeasibilityEstimatorFeatureCannotExist(object):
         return '%s(%s)'%(self.__class__.__name__, infos)
 
     def transform(self, graphs):
-        """
-        Convert a list of NetworkX graphs to a CSR feature matrix using the
-        new QuotientGraph pipeline.  Remains sparse so downstream .dot() and
-        .A calls behave exactly like before.
+        """Vectorize graphs into a sparse feature matrix.
+
+        Args:
+            graphs: Graphs to transform.
+
+        Returns:
+            scipy.sparse.csr_matrix: Sparse feature matrix with one row per
+            graph.
         """
         # Allow explicit worker control while preserving the old parallel flag.
         n_jobs = self.n_jobs if self.n_jobs is not None else (-1 if self.parallel else 1)
@@ -251,6 +458,14 @@ class FeasibilityEstimatorFeatureCannotExist(object):
         return transformer.transform(graphs)
 
     def fit(self, graphs):
+        """Learn which features must never exist.
+
+        Args:
+            graphs: Training graphs.
+
+        Returns:
+            FeasibilityEstimatorFeatureCannotExist: The fitted estimator.
+        """
         data_mtx = self.transform(graphs).astype(bool)
         # find all missing features
         exist_feats = data_mtx.astype(bool).sum(axis=0).A.flatten().astype(bool)
@@ -258,12 +473,28 @@ class FeasibilityEstimatorFeatureCannotExist(object):
         return self
 
     def number_of_violations(self, graphs):
+        """Count forbidden features present in each graph.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Integer violation counts.
+        """
         assert self.cannot_exist_features_vec is not None, 'FeasibilityEstimatorFeatureCannotExist is not fit'
         data_mtx = self.transform(graphs)
         preds = data_mtx.dot(self.cannot_exist_features_vec.astype(int))
         return preds
 
     def predict(self, graphs):
+        """Predict whether each graph avoids forbidden features.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Boolean feasibility predictions.
+        """
         assert self.cannot_exist_features_vec is not None, 'FeasibilityEstimatorFeatureCannotExist is not fit'
         data_mtx = self.transform(graphs).astype(bool)
         cannot_exist = data_mtx.dot(self.cannot_exist_features_vec)
@@ -277,6 +508,10 @@ class FeasibilityEstimator(object):
     Sub-estimators are evaluated in order. During prediction, each estimator
     sees only the graphs that survived all previous checks, so later and more
     expensive estimators can short-circuit when earlier constraints fail.
+
+    Args:
+        feasibility_estimators: Sequence of sub-estimators to apply.
+        parallel: Whether child estimators should default to parallel mode.
     """
     
     def __init__(self, feasibility_estimators, parallel=True):
@@ -284,6 +519,11 @@ class FeasibilityEstimator(object):
         self.set_parallel(parallel)        
 
     def set_parallel(self, parallel):
+        """Set the parallel flag on all sub-estimators.
+
+        Args:
+            parallel: Parallel flag propagated to child estimators.
+        """
         feasibility_estimators = []
         for feasibility_estimator in self.feasibility_estimators:
             feasibility_estimator.parallel = parallel
@@ -296,11 +536,29 @@ class FeasibilityEstimator(object):
         return '%s(%s)'%(self.__class__.__name__, infos)
 
     def fit(self, graphs):
+        """Fit all sub-estimators on the valid labeled subset.
+
+        Args:
+            graphs: Training graphs.
+
+        Returns:
+            FeasibilityEstimator: The fitted estimator.
+        """
         graphs = filter_graphs_without_node_and_edge_label_attribute(graphs)
         self.feasibility_estimators = [feasibility_estimator.fit(graphs) for feasibility_estimator in self.feasibility_estimators]
         return self
 
     def _predict_estimator_on_indices(self, feasibility_estimator, graphs, indices):
+        """Evaluate one estimator on a graph subset.
+
+        Args:
+            feasibility_estimator: Sub-estimator to evaluate.
+            graphs: Full graph collection.
+            indices: Indices selecting the subset to score.
+
+        Returns:
+            np.ndarray: Predictions for the selected graphs.
+        """
         if hasattr(feasibility_estimator, 'predict_masked'):
             return np.asarray(feasibility_estimator.predict_masked(graphs, indices))
         selected_graphs = [graphs[idx] for idx in indices]
@@ -341,15 +599,61 @@ class FeasibilityEstimator(object):
         return preds
 
     def predict(self, graphs):
+        """Predict feasibility for all graphs.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Boolean feasibility mask.
+        """
         return self.predict_masked(graphs)
 
+    def violations(self, graphs):
+        """Return per-estimator violation counts for each graph.
+
+        Args:
+            graphs: Graph collection to evaluate.
+
+        Returns:
+            np.ndarray: Matrix with shape
+            ``(len(graphs), len(self.feasibility_estimators))`` where each
+            column contains the violation magnitudes reported by one
+            sub-estimator.
+        """
+        n_graphs = len(graphs)
+        n_estimators = len(self.feasibility_estimators)
+        if n_estimators == 0:
+            return np.zeros((n_graphs, 0), dtype=int)
+        preds = [
+            np.asarray(feasibility_estimator.number_of_violations(graphs)).reshape(-1, 1)
+            for feasibility_estimator in self.feasibility_estimators
+        ]
+        return np.hstack(preds)
+
     def number_of_violations(self, graphs):
-        preds = [feasibility_estimator.number_of_violations(graphs).reshape(-1,1) for feasibility_estimator in self.feasibility_estimators]
-        preds = np.hstack(preds)
-        preds = np.sum(preds, axis=1)
-        return preds
+        """Return total violation count per graph.
+
+        Args:
+            graphs: Graphs to evaluate.
+
+        Returns:
+            np.ndarray: Row-wise sums of :meth:`violations`.
+        """
+        preds = self.violations(graphs)
+        return np.sum(preds, axis=1)
 
     def filter(self, graphs, targets=None):
+        """Keep only feasible graphs, optionally preserving targets.
+
+        Args:
+            graphs: Graphs to filter.
+            targets: Optional target values aligned with ``graphs``.
+
+        Returns:
+            list | tuple[list, list]: Feasible graphs alone, or feasible graphs
+            with aligned targets when ``targets`` is provided.
+        """
         graphs = filter_graphs_without_node_and_edge_label_attribute(graphs)
         is_feasible = self.predict(graphs)
         selected_graphs = [graphs[idx] for idx in range(len(graphs)) if is_feasible[idx]==True]
@@ -360,6 +664,15 @@ class FeasibilityEstimator(object):
 
 
 def ConcreteFeasibilityEstimator(min_size=1, max_size=None):
+    """Build the standard hand-coded feasibility estimator.
+
+    Args:
+        min_size: Minimum allowed number of nodes.
+        max_size: Optional maximum allowed number of nodes.
+
+    Returns:
+        FeasibilityEstimator: Composite estimator with structural constraints.
+    """
     feasibility_estimators = [FeasibilityEstimatorHasNodeAndEdgeLabelAttribute(),
                               FeasibilityEstimatorHasNoSelfLoops(),
                               FeasibilityEstimatorNumberOfNodesInRange(min_size=min_size, max_size=max_size),

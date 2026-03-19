@@ -21,6 +21,7 @@ Most feasibility objects expose a small common interface:
 - `fit(graphs)`
 - `predict(graphs)`
 - `predict_masked(graphs, indices=None)` on the composite estimator
+- `violations(graphs)` on the composite estimator
 - `number_of_violations(graphs)`
 - `filter(graphs, targets=None)` on the composite estimator
 
@@ -84,6 +85,10 @@ Its behavior is:
 - evaluation stops early when no graphs remain feasible
 - `predict_masked(graphs, indices=None)` runs the same logic on a selected
   subset of graph indices and returns a full-length boolean mask
+- `violations(graphs)` returns one column per sub-estimator, so you can see
+  which constraints each graph violates and by how much
+  the matrix shape is `(n_graphs, n_estimators)`
+  columns follow the order of `feasibility_estimators`
 - `number_of_violations(graphs)` sums violation magnitudes across the
   sub-estimators
 - `filter(graphs, targets=None)` keeps only feasible graphs, optionally keeping
@@ -141,16 +146,19 @@ feasibility.fit(train_graphs)
 is_feasible = feasibility.predict(candidate_graphs)
 subset_mask = feasibility.predict_masked(candidate_graphs, indices=[0, 3, 5])
 filtered_graphs = feasibility.filter(candidate_graphs)
+violation_matrix = feasibility.violations(candidate_graphs)
 violation_sizes = feasibility.number_of_violations(candidate_graphs)
 ```
+
+Here `violation_matrix[i, j]` is the violation count contributed by the
+`j`-th sub-estimator on the `i`-th graph, and `violation_sizes[i]` is the sum
+across that row.
 
 ## Current Limitation
 
 The module is already useful, but it is still fairly coarse:
 
 - some estimators act like hard filters rather than rich diagnostics
-- `number_of_violations(...)` is scalar and does not explain which constraint
-  failed
 - feature-based feasibility depends on hashed vectorization, so it is not yet a
   full structural explanation layer
 
