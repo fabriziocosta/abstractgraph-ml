@@ -20,6 +20,7 @@ Most feasibility objects expose a small common interface:
 
 - `fit(graphs)`
 - `predict(graphs)`
+- `predict_masked(graphs, indices=None)` on the composite estimator
 - `number_of_violations(graphs)`
 - `filter(graphs, targets=None)` on the composite estimator
 
@@ -77,12 +78,21 @@ Its behavior is:
 
 - `predict(graphs)` returns `True` only when all sub-estimators accept the
   graph
+- sub-estimators are evaluated in order, from first to last
+- after each step, only the surviving graphs are passed to the next
+  sub-estimator
+- evaluation stops early when no graphs remain feasible
+- `predict_masked(graphs, indices=None)` runs the same logic on a selected
+  subset of graph indices and returns a full-length boolean mask
 - `number_of_violations(graphs)` sums violation magnitudes across the
   sub-estimators
 - `filter(graphs, targets=None)` keeps only feasible graphs, optionally keeping
   targets aligned
 
 This composite form is the main entry point for generation workflows.
+Ordering therefore matters: put cheap structural checks first and expensive
+feature-based checks later so the composite can reject invalid graphs as early
+as possible.
 
 ## Concrete Presets
 
@@ -129,6 +139,7 @@ feasibility = ConcreteFeasibilityEstimatorObservedSize(
 feasibility.fit(train_graphs)
 
 is_feasible = feasibility.predict(candidate_graphs)
+subset_mask = feasibility.predict_masked(candidate_graphs, indices=[0, 3, 5])
 filtered_graphs = feasibility.filter(candidate_graphs)
 violation_sizes = feasibility.number_of_violations(candidate_graphs)
 ```

@@ -79,7 +79,8 @@ It contains:
 - observed-range estimators learned during `fit`
 - feature-based feasibility estimators built on top of vectorization
 - `FeasibilityEstimator`
-  a composite constraint object that combines multiple checks
+  a composite constraint object that combines multiple checks and evaluates
+  them in order on the surviving graphs only
 
 See [docs/FEASIBILITY.md](docs/FEASIBILITY.md) for a fuller overview.
 

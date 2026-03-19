@@ -162,11 +162,12 @@ class FeasibilityEstimatorIsConnected(object):
 
 
 class FeasibilityEstimatorFeatureMustExist(object):
-    def __init__(self, decomposition_function=None, nbits=14, parallel=True):
+    def __init__(self, decomposition_function=None, nbits=14, parallel=True, n_jobs=None):
         self.decomposition_function = decomposition_function
         self.nbits = nbits
         self.must_exist_features_vec = None
         self.parallel = parallel
+        self.n_jobs = n_jobs
 
     def transform(self, graphs):
         """
@@ -174,8 +175,8 @@ class FeasibilityEstimatorFeatureMustExist(object):
         new QuotientGraph pipeline.  Remains sparse so downstream .dot() and
         .A calls behave exactly like before.
         """
-        # Honour the old parallel flag
-        n_jobs = -1 if self.parallel else 1
+        # Allow explicit worker control while preserving the old parallel flag.
+        n_jobs = self.n_jobs if self.n_jobs is not None else (-1 if self.parallel else 1)
 
         # Default to identity decomposition if none provided
         decomp = self.decomposition_function or (lambda ag: ag)
@@ -215,12 +216,13 @@ class FeasibilityEstimatorFeatureMustExist(object):
 
 
 class FeasibilityEstimatorFeatureCannotExist(object):
-    def __init__(self, decomposition_function=None, nbits=14, parallel=True, backend="threading"):
+    def __init__(self, decomposition_function=None, nbits=14, parallel=True, backend="threading", n_jobs=None):
         self.decomposition_function = decomposition_function
         self.nbits = nbits
         self.cannot_exist_features_vec = None
         self.parallel = parallel
         self.backend = backend
+        self.n_jobs = n_jobs
 
     def __repr__(self):
         infos = ['%s:%s'%(key,value) for key,value in self.__dict__.items()]
@@ -233,8 +235,8 @@ class FeasibilityEstimatorFeatureCannotExist(object):
         new QuotientGraph pipeline.  Remains sparse so downstream .dot() and
         .A calls behave exactly like before.
         """
-        # Honour the old parallel flag
-        n_jobs = -1 if self.parallel else 1
+        # Allow explicit worker control while preserving the old parallel flag.
+        n_jobs = self.n_jobs if self.n_jobs is not None else (-1 if self.parallel else 1)
 
         # Default to identity decomposition if none provided
         decomp = self.decomposition_function or (lambda qg: qg)
@@ -270,6 +272,12 @@ class FeasibilityEstimatorFeatureCannotExist(object):
 
 
 class FeasibilityEstimator(object):
+    """Composite graph feasibility estimator.
+
+    Sub-estimators are evaluated in order. During prediction, each estimator
+    sees only the graphs that survived all previous checks, so later and more
+    expensive estimators can short-circuit when earlier constraints fail.
+    """
     
     def __init__(self, feasibility_estimators, parallel=True):
         self.feasibility_estimators = feasibility_estimators
@@ -292,11 +300,48 @@ class FeasibilityEstimator(object):
         self.feasibility_estimators = [feasibility_estimator.fit(graphs) for feasibility_estimator in self.feasibility_estimators]
         return self
 
-    def predict(self, graphs):
-        preds = [feasibility_estimator.predict(graphs).reshape(-1,1) for feasibility_estimator in self.feasibility_estimators]
-        preds = np.hstack(preds)
-        preds = np.all(preds, axis=1)
+    def _predict_estimator_on_indices(self, feasibility_estimator, graphs, indices):
+        if hasattr(feasibility_estimator, 'predict_masked'):
+            return np.asarray(feasibility_estimator.predict_masked(graphs, indices))
+        selected_graphs = [graphs[idx] for idx in indices]
+        return np.asarray(feasibility_estimator.predict(selected_graphs))
+
+    def predict_masked(self, graphs, indices=None):
+        """Predict feasibility for a subset of graphs and return a full mask.
+
+        Args:
+            graphs: Full graph collection.
+            indices: Optional graph indices to evaluate. If omitted, all graphs
+                are evaluated.
+
+        Returns:
+            np.ndarray: Boolean feasibility mask with length ``len(graphs)``.
+            Entries outside ``indices`` remain ``False``.
+        """
+        if indices is None:
+            indices = np.arange(len(graphs))
+        else:
+            indices = np.asarray(indices, dtype=int)
+
+        preds = np.zeros(len(graphs), dtype=bool)
+        if len(indices) == 0:
+            return preds
+
+        surviving_indices = indices.copy()
+        preds[surviving_indices] = True
+        for feasibility_estimator in self.feasibility_estimators:
+            if len(surviving_indices) == 0:
+                break
+            estimator_preds = self._predict_estimator_on_indices(
+                feasibility_estimator, graphs, surviving_indices
+            ).astype(bool, copy=False)
+            failed_indices = surviving_indices[np.logical_not(estimator_preds)]
+            preds[failed_indices] = False
+            surviving_indices = surviving_indices[estimator_preds]
         return preds
+
+    def predict(self, graphs):
+        return self.predict_masked(graphs)
 
     def number_of_violations(self, graphs):
         preds = [feasibility_estimator.number_of_violations(graphs).reshape(-1,1) for feasibility_estimator in self.feasibility_estimators]
