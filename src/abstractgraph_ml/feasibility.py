@@ -1,9 +1,15 @@
 #!/usr/bin/env python
 """Provides scikit interface."""
 
+from typing import FrozenSet, Iterable, List, Tuple
+
 import numpy as np
 import networkx as nx
+from abstractgraph.graphs import get_mapped_subgraph, graph_to_abstract_graph
 from abstractgraph.vectorize import AbstractGraphTransformer
+
+Node = int
+Edge = Tuple[Node, Node]
 
 def label_attribute_is_present(graph):
     """Check whether all nodes and edges carry a ``label`` attribute.
@@ -457,6 +463,38 @@ class FeasibilityEstimatorFeatureCannotExist(object):
         )
         return transformer.transform(graphs)
 
+    def _decomposition(self):
+        """Return the decomposition function used by both transform and diagnostics."""
+        return self.decomposition_function or (lambda qg: qg)
+
+    def _abstract_graphs(self, graphs):
+        """Convert graphs into labeled AbstractGraphs matching transform semantics."""
+        graphs = list(graphs)
+        decomp = self._decomposition()
+        return [
+            graph_to_abstract_graph(graph=graph, decomposition_function=decomp, nbits=self.nbits)
+            for graph in graphs
+        ]
+
+    def _is_forbidden_label(self, label):
+        """Check whether an interpretation-node label maps to a forbidden bucket."""
+        assert self.cannot_exist_features_vec is not None, 'FeasibilityEstimatorFeatureCannotExist is not fit'
+        if label is None:
+            return False
+        try:
+            label_int = int(label)
+        except (TypeError, ValueError):
+            return False
+        if label_int < 0 or label_int >= len(self.cannot_exist_features_vec):
+            return False
+        return bool(self.cannot_exist_features_vec[label_int])
+
+    def _mapped_subgraph_edge_set(self, mapped_subgraph) -> FrozenSet[Edge]:
+        """Return a stable undirected edge-set view for a mapped base subgraph."""
+        if mapped_subgraph is None:
+            return frozenset()
+        return frozenset((min(u, v), max(u, v)) for u, v in mapped_subgraph.edges())
+
     def fit(self, graphs):
         """Learn which features must never exist.
 
@@ -470,6 +508,7 @@ class FeasibilityEstimatorFeatureCannotExist(object):
         # find all missing features
         exist_feats = data_mtx.astype(bool).sum(axis=0).A.flatten().astype(bool)
         self.cannot_exist_features_vec = np.logical_not(exist_feats)
+        self.seen_feature_labels = set(np.flatnonzero(exist_feats))
         return self
 
     def number_of_violations(self, graphs):
@@ -500,6 +539,21 @@ class FeasibilityEstimatorFeatureCannotExist(object):
         cannot_exist = data_mtx.dot(self.cannot_exist_features_vec)
         preds = np.logical_not(cannot_exist)
         return preds
+
+    def violating_edge_sets(self, graphs: Iterable) -> List[List[FrozenSet[Edge]]]:
+        """Return violating mapped-subgraph edge sets for each graph."""
+        assert self.cannot_exist_features_vec is not None, 'FeasibilityEstimatorFeatureCannotExist is not fit'
+        graphs = list(graphs)
+        violating_sets: List[List[FrozenSet[Edge]]] = []
+        for abstract_graph in self._abstract_graphs(graphs):
+            graph_violations: List[FrozenSet[Edge]] = []
+            for _, data in abstract_graph.interpretation_graph.nodes(data=True):
+                if not self._is_forbidden_label(data.get("label")):
+                    continue
+                mapped_subgraph = get_mapped_subgraph(data)
+                graph_violations.append(self._mapped_subgraph_edge_set(mapped_subgraph))
+            violating_sets.append(graph_violations)
+        return violating_sets
 
 
 class FeasibilityEstimator(object):
@@ -642,6 +696,18 @@ class FeasibilityEstimator(object):
         """
         preds = self.violations(graphs)
         return np.sum(preds, axis=1)
+
+    def violating_edge_sets(self, graphs: Iterable) -> List[List[FrozenSet[Edge]]]:
+        """Concatenate violating edge sets from child estimators that expose them."""
+        graphs = list(graphs)
+        violating_sets: List[List[FrozenSet[Edge]]] = [[] for _ in range(len(graphs))]
+        for feasibility_estimator in self.feasibility_estimators:
+            if not hasattr(feasibility_estimator, "violating_edge_sets"):
+                continue
+            estimator_violations = feasibility_estimator.violating_edge_sets(graphs)
+            for graph_idx, graph_violations in enumerate(estimator_violations):
+                violating_sets[graph_idx].extend(graph_violations)
+        return violating_sets
 
     def filter(self, graphs, targets=None):
         """Keep only feasible graphs, optionally preserving targets.
