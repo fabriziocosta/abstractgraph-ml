@@ -495,6 +495,12 @@ class FeasibilityEstimatorFeatureCannotExist(object):
             return frozenset()
         return frozenset((min(u, v), max(u, v)) for u, v in mapped_subgraph.edges())
 
+    def _mapped_subgraph_node_set(self, mapped_subgraph) -> FrozenSet[Node]:
+        """Return the base-graph node ids covered by a mapped subgraph."""
+        if mapped_subgraph is None:
+            return frozenset()
+        return frozenset(mapped_subgraph.nodes())
+
     def fit(self, graphs):
         """Learn which features must never exist.
 
@@ -552,6 +558,21 @@ class FeasibilityEstimatorFeatureCannotExist(object):
                     continue
                 mapped_subgraph = get_mapped_subgraph(data)
                 graph_violations.append(self._mapped_subgraph_edge_set(mapped_subgraph))
+            violating_sets.append(graph_violations)
+        return violating_sets
+
+    def violating_node_labels_sets(self, graphs: Iterable) -> List[List[FrozenSet[Node]]]:
+        """Return violating mapped-subgraph node-id sets for each graph."""
+        assert self.cannot_exist_features_vec is not None, 'FeasibilityEstimatorFeatureCannotExist is not fit'
+        graphs = list(graphs)
+        violating_sets: List[List[FrozenSet[Node]]] = []
+        for abstract_graph in self._abstract_graphs(graphs):
+            graph_violations: List[FrozenSet[Node]] = []
+            for _, data in abstract_graph.interpretation_graph.nodes(data=True):
+                if not self._is_forbidden_label(data.get("label")):
+                    continue
+                mapped_subgraph = get_mapped_subgraph(data)
+                graph_violations.append(self._mapped_subgraph_node_set(mapped_subgraph))
             violating_sets.append(graph_violations)
         return violating_sets
 
@@ -705,6 +726,18 @@ class FeasibilityEstimator(object):
             if not hasattr(feasibility_estimator, "violating_edge_sets"):
                 continue
             estimator_violations = feasibility_estimator.violating_edge_sets(graphs)
+            for graph_idx, graph_violations in enumerate(estimator_violations):
+                violating_sets[graph_idx].extend(graph_violations)
+        return violating_sets
+
+    def violating_node_labels_sets(self, graphs: Iterable) -> List[List[FrozenSet[Node]]]:
+        """Concatenate violating node-id sets from child estimators that expose them."""
+        graphs = list(graphs)
+        violating_sets: List[List[FrozenSet[Node]]] = [[] for _ in range(len(graphs))]
+        for feasibility_estimator in self.feasibility_estimators:
+            if not hasattr(feasibility_estimator, "violating_node_labels_sets"):
+                continue
+            estimator_violations = feasibility_estimator.violating_node_labels_sets(graphs)
             for graph_idx, graph_violations in enumerate(estimator_violations):
                 violating_sets[graph_idx].extend(graph_violations)
         return violating_sets

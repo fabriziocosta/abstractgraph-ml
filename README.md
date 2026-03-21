@@ -78,6 +78,8 @@ It contains:
 - simple structural feasibility checks
 - observed-range estimators learned during `fit`
 - feature-based feasibility estimators built on top of vectorization
+- motif-level diagnostics for estimators that can report violating edge sets
+  and violating node-id sets
 - `FeasibilityEstimator`
   a composite constraint object that combines multiple checks and evaluates
   them in order on the surviving graphs only

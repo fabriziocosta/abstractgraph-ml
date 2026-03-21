@@ -23,6 +23,8 @@ Most feasibility objects expose a small common interface:
 - `predict_masked(graphs, indices=None)` on the composite estimator
 - `violations(graphs)` on the composite estimator
 - `number_of_violations(graphs)`
+- `violating_edge_sets(graphs)` on estimators that can map violations back to motifs
+- `violating_node_labels_sets(graphs)` on estimators that can map violations back to motif node ids
 - `filter(graphs, targets=None)` on the composite estimator
 
 This makes them easy to use as a final validation layer around other
@@ -91,6 +93,10 @@ Its behavior is:
   columns follow the order of `feasibility_estimators`
 - `number_of_violations(graphs)` sums violation magnitudes across the
   sub-estimators
+- `violating_edge_sets(graphs)` concatenates motif edge sets from any
+  sub-estimator that exposes them
+- `violating_node_labels_sets(graphs)` concatenates motif node-id sets from
+  any sub-estimator that exposes them
 - `filter(graphs, targets=None)` keeps only feasible graphs, optionally keeping
   targets aligned
 
@@ -148,11 +154,17 @@ subset_mask = feasibility.predict_masked(candidate_graphs, indices=[0, 3, 5])
 filtered_graphs = feasibility.filter(candidate_graphs)
 violation_matrix = feasibility.violations(candidate_graphs)
 violation_sizes = feasibility.number_of_violations(candidate_graphs)
+violating_edges = feasibility.violating_edge_sets(candidate_graphs)
+violating_nodes = feasibility.violating_node_labels_sets(candidate_graphs)
 ```
 
 Here `violation_matrix[i, j]` is the violation count contributed by the
 `j`-th sub-estimator on the `i`-th graph, and `violation_sizes[i]` is the sum
 across that row.
+
+When supported by the active sub-estimators, `violating_edges[i]` is the list
+of violating motif edge sets found in graph `i`, and `violating_nodes[i]` is
+the corresponding list of node-id sets for those motifs.
 
 ## Current Limitation
 
@@ -161,6 +173,8 @@ The module is already useful, but it is still fairly coarse:
 - some estimators act like hard filters rather than rich diagnostics
 - feature-based feasibility depends on hashed vectorization, so it is not yet a
   full structural explanation layer
+- motif diagnostics are currently available only on the estimators that expose
+  `violating_edge_sets(...)` and `violating_node_labels_sets(...)`
 
 That makes feasibility a strong practical component today, and a good candidate
 for deeper constraint-reporting later.

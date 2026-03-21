@@ -41,6 +41,17 @@ class _ViolatingEdgeSetEstimator:
         return self._edge_sets[: len(graphs)]
 
 
+class _ViolatingNodeSetEstimator:
+    def __init__(self, node_sets):
+        self._node_sets = node_sets
+
+    def fit(self, graphs):
+        return self
+
+    def violating_node_labels_sets(self, graphs):
+        return self._node_sets[: len(graphs)]
+
+
 def _make_graphs(n):
     graphs = []
     for idx in range(n):
@@ -137,6 +148,21 @@ def test_feature_cannot_exist_violating_edge_sets_returns_one_list_per_graph():
     assert violating[1] == [frozenset({(0, 1), (1, 2)})]
 
 
+def test_feature_cannot_exist_violating_node_labels_sets_returns_one_list_per_graph():
+    train_graphs = [_make_labeled_path_graph(2)]
+    test_graphs = [_make_labeled_path_graph(2), _make_labeled_path_graph(3)]
+    estimator = FeasibilityEstimatorFeatureCannotExist(
+        decomposition_function=_singleton_and_edge_decomposition,
+        parallel=False,
+    ).fit(train_graphs)
+
+    violating = estimator.violating_node_labels_sets(test_graphs)
+
+    assert len(violating) == 2
+    assert violating[0] == []
+    assert violating[1] == [frozenset({0, 1, 2})]
+
+
 def test_feature_cannot_exist_violating_edge_sets_preserves_multiple_violating_nodes():
     train_graph = _make_labeled_path_graph(2)
     test_graph = _make_labeled_path_graph(4)
@@ -150,6 +176,22 @@ def test_feature_cannot_exist_violating_edge_sets_preserves_multiple_violating_n
     assert violating == [[
         frozenset({(0, 1), (1, 2), (2, 3)}),
         frozenset({(0, 1), (1, 2)}),
+    ]]
+
+
+def test_feature_cannot_exist_violating_node_labels_sets_preserves_multiple_violating_nodes():
+    train_graph = _make_labeled_path_graph(2)
+    test_graph = _make_labeled_path_graph(4)
+    estimator = FeasibilityEstimatorFeatureCannotExist(
+        decomposition_function=_singleton_and_edge_decomposition,
+        parallel=False,
+    ).fit([train_graph])
+
+    violating = estimator.violating_node_labels_sets([test_graph])
+
+    assert violating == [[
+        frozenset({0, 1, 2, 3}),
+        frozenset({0, 1, 2}),
     ]]
 
 
@@ -176,6 +218,29 @@ def test_feature_cannot_exist_violating_edge_sets_canonicalizes_edge_direction()
     assert violating == [[frozenset({(1, 2), (2, 5)})]]
 
 
+def test_feature_cannot_exist_violating_node_labels_sets_preserves_node_ids():
+    train_graph = nx.Graph()
+    train_graph.add_node(1, label="a")
+    train_graph.add_node(2, label="a")
+    train_graph.add_edge(1, 2, label="x")
+
+    test_graph = nx.Graph()
+    test_graph.add_node(5, label="a")
+    test_graph.add_node(2, label="a")
+    test_graph.add_node(1, label="a")
+    test_graph.add_edge(5, 2, label="x")
+    test_graph.add_edge(2, 1, label="x")
+
+    estimator = FeasibilityEstimatorFeatureCannotExist(
+        decomposition_function=_singleton_and_edge_decomposition,
+        parallel=False,
+    ).fit([train_graph])
+
+    violating = estimator.violating_node_labels_sets([test_graph])
+
+    assert violating == [[frozenset({1, 2, 5})]]
+
+
 def test_feasibility_violating_edge_sets_concatenates_and_skips_missing_methods():
     graphs = _make_graphs(2)
     first = _ViolatingEdgeSetEstimator([[frozenset({(0, 1)})], []])
@@ -188,4 +253,19 @@ def test_feasibility_violating_edge_sets_concatenates_and_skips_missing_methods(
     assert violating == [
         [frozenset({(0, 1)}), frozenset({(2, 3)})],
         [frozenset()],
+    ]
+
+
+def test_feasibility_violating_node_labels_sets_concatenates_and_skips_missing_methods():
+    graphs = _make_graphs(2)
+    first = _ViolatingNodeSetEstimator([[frozenset({0, 1})], []])
+    second = _ViolationEstimator([0, 0])
+    third = _ViolatingNodeSetEstimator([[frozenset({2, 3})], [frozenset({4})]])
+    estimator = FeasibilityEstimator([first, second, third])
+
+    violating = estimator.violating_node_labels_sets(graphs)
+
+    assert violating == [
+        [frozenset({0, 1}), frozenset({2, 3})],
+        [frozenset({4})],
     ]
