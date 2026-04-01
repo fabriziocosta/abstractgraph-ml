@@ -21,7 +21,8 @@ This repo owns:
 - `abstractgraph_ml.feasibility`
   structural and feature-based feasibility filters
 - `abstractgraph_ml.importance`
-  saliency and feature-to-graph visualization helpers
+  saliency and feature-to-graph visualization helpers, including
+  `display_topk_feature_subgraphs(...)` for grouped top-feature inspection
 - `abstractgraph_ml.topk`
   top-k operator/feature selection workflows
 
@@ -54,6 +55,8 @@ direction.
 2. Build an `AbstractGraphTransformer` or `AbstractGraphNodeTransformer`.
 3. Train a `GraphEstimator` or `NeuralGraphEstimator`.
 4. Inspect results with `importance` or `topk`.
+   `display_topk_feature_subgraphs(...)` is the shortest path from fitted
+   feature ranking back to representative mapped subgraphs.
 
 ## Notebooks
 

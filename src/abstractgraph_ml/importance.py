@@ -12,7 +12,8 @@ import networkx as nx
 import numpy as np
 from matplotlib.colors import Normalize
 
-from abstractgraph.display import get_color, stable_hash
+from abstractgraph.display import display_grouped_graphs, get_color, stable_hash
+from abstractgraph.feature_subgraphs import feature_subgraphs
 from abstractgraph.graphs import AbstractGraph
 from abstractgraph.labels import graph_hash_label_function_factory
 
@@ -330,8 +331,91 @@ def plot_graph_node_saliency_grid(
     return fig, axes
 
 
+def display_topk_feature_subgraphs(
+    graphs: Iterable[nx.Graph],
+    graph_estimator: "GraphEstimator",
+    *,
+    top_k_features: int = 8,
+    n_graphs_per_line: int = 6,
+    size: Tuple[float, float] = (2.2, 2.2),
+    title_formatter: Optional[Callable[[Any], str]] = None,
+    show: bool = True,
+) -> Optional[plt.Figure]:
+    """Display grouped representative subgraphs for the estimator's top features.
+
+    The function vectorizes ``graphs`` once, finds one graph containing each top
+    ranked feature id, collects unique mapped subgraphs for those feature ids,
+    and renders them in grouped boxes using ``display_grouped_graphs``.
+
+    Args:
+        graphs: Candidate graphs to search for top-feature occurrences.
+        graph_estimator: Fitted graph estimator with a configured transformer.
+        top_k_features: Maximum number of ranked feature ids to visualize.
+        n_graphs_per_line: Number of subgraph cells per row in the grouped view.
+        size: Per-cell subplot size in inches.
+        title_formatter: Optional formatter for group titles.
+        show: Whether to call ``plt.show()`` in the grouped display.
+
+    Returns:
+        Matplotlib figure, or ``None`` when no matching feature subgraphs exist.
+    """
+    if graph_estimator.transformer is None:
+        raise ValueError("graph_estimator.transformer must be set to display top features.")
+    decomposition_function = graph_estimator.transformer.decomposition_function
+    if decomposition_function is None:
+        raise ValueError("graph_estimator.transformer.decomposition_function must be set.")
+    nbits = graph_estimator.transformer.nbits
+
+    graphs_list = list(graphs or [])
+    if not graphs_list:
+        print("No graphs were provided.")
+        return None
+
+    ranked_feature_ids = list(graph_estimator.get_ranked_feature_ids(fit_if_needed=False))
+    X = np.asarray(graph_estimator.transformer.transform(graphs_list))
+
+    selected_feature_ids = []
+    selected_graph_ids = set()
+    for feature_id in ranked_feature_ids:
+        graph_indices = np.flatnonzero(X[:, feature_id] > 0)
+        if graph_indices.size == 0:
+            continue
+        selected_feature_ids.append(feature_id)
+        selected_graph_ids.add(int(graph_indices[0]))
+        if len(selected_feature_ids) >= int(top_k_features):
+            break
+
+    selected_graphs = [graphs_list[graph_idx] for graph_idx in sorted(selected_graph_ids)]
+    feature_subgraph_map = feature_subgraphs(
+        selected_graphs,
+        decomposition_function=decomposition_function,
+        nbits=nbits,
+    )
+    feature_groups = [
+        (feature_id, feature_subgraph_map[feature_id])
+        for feature_id in selected_feature_ids
+        if feature_subgraph_map.get(feature_id)
+    ]
+
+    if not feature_groups:
+        print("No subgraphs were found for the top-ranked features.")
+        return None
+
+    if title_formatter is None:
+        title_formatter = lambda feature_id: f"feature_id={feature_id}"
+
+    return display_grouped_graphs(
+        feature_groups,
+        n_graphs_per_line=n_graphs_per_line,
+        size=size,
+        title_formatter=title_formatter,
+        show=show,
+    )
+
+
 __all__ = [
     "annotate_graph_node_saliency",
+    "display_topk_feature_subgraphs",
     "plot_graph_node_saliency",
     "plot_graph_node_saliency_with_estimator",
     "plot_graph_node_saliency_grid",

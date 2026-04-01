@@ -97,6 +97,13 @@ Use it when you want to answer questions such as:
 - which structural features dominate a fitted model
 - how a ranked feature can be visualized as recurring subgraph structure
 
+Key helper:
+
+- `display_topk_feature_subgraphs(...)`
+  vectorizes a graph set once, finds graphs that contain the estimator's top
+  ranked hashed features, recovers unique mapped subgraphs for those feature
+  ids, and renders them grouped by `feature_id`
+
 ### Top-k Selection
 
 [topk.py](src/abstractgraph_ml/topk.py) provides feature and operator ranking
