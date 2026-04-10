@@ -190,14 +190,8 @@ def plot_graph_node_saliency(
         fig, ax = plt.subplots(figsize=size)
         created_ax = True
     pos = nx.kamada_kawai_layout(graph) if graph.number_of_nodes() > 0 else {}
-    node_colors = []
     node_vals = []
-    for n, d in graph.nodes(data=True):
-        lbl = d.get("label")
-        if lbl is not None:
-            node_colors.append(get_color(lbl, cmap_name="hsv"))
-        else:
-            node_colors.append(get_color(stable_hash(str(n)), cmap_name="hsv"))
+    for _, d in graph.nodes(data=True):
         node_vals.append(float(d.get("importance", 0.0)))
 
     if node_vals:
@@ -209,6 +203,8 @@ def plot_graph_node_saliency(
             node_strength = [float(np.power(node_norm(v), 0.55)) for v in node_vals]
     else:
         node_strength = []
+    node_col_vals = [rlo + x * (rhi - rlo) for x in (node_strength or [0.0 for _ in graph.nodes()])]
+    node_colors = [cmap_obj(cv) for cv in node_col_vals]
     ns_min, ns_max = node_size_range
     node_sizes = [
         ns_min + (ns_max - ns_min) * strength
