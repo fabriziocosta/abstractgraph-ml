@@ -126,8 +126,9 @@ def plot_graph_node_saliency(
     graph: nx.Graph,
     *,
     cmap: str = "YlOrRd",
-    color_value_range: Tuple[float, float] = (0.0, 1.0),
-    width_range: Tuple[float, float] = (0.5, 6.0),
+    color_value_range: Tuple[float, float] = (0.18, 1.0),
+    width_range: Tuple[float, float] = (1.5, 9.0),
+    node_size_range: Tuple[float, float] = (140.0, 280.0),
     size: Tuple[float, float] = (7, 6),
     ax: Optional[plt.Axes] = None,
     show: bool = True,
@@ -140,6 +141,7 @@ def plot_graph_node_saliency(
         cmap: Matplotlib colormap name.
         color_value_range: Range of normalized color values to use.
         width_range: Min/max edge widths.
+        node_size_range: Min/max node sizes.
         size: Figure size when creating a new axis.
         ax: Optional axis to draw into.
         show: Whether to show the figure when a new axis is created.
@@ -172,12 +174,14 @@ def plot_graph_node_saliency(
         s_norm = [float(norm(s)) for s in edge_vals]
     else:
         s_norm = [0.0 for _ in edge_vals]
-    col_vals = [rlo + x * (rhi - rlo) for x in s_norm]
+    # Use a mild power-law expansion so mid-range importance reads more clearly.
+    edge_strength = [float(np.power(x, 0.6)) for x in s_norm]
+    col_vals = [rlo + x * (rhi - rlo) for x in edge_strength]
     colors = [cmap_obj(cv) for cv in col_vals]
 
     wmin, wmax = width_range
     if vmax > vmin:
-        widths = [wmin + (wmax - wmin) * norm(s) for s in edge_vals]
+        widths = [wmin + (wmax - wmin) * strength for strength in edge_strength]
     else:
         widths = [wmin for _ in edge_vals]
 
@@ -187,20 +191,37 @@ def plot_graph_node_saliency(
         created_ax = True
     pos = nx.kamada_kawai_layout(graph) if graph.number_of_nodes() > 0 else {}
     node_colors = []
+    node_vals = []
     for n, d in graph.nodes(data=True):
         lbl = d.get("label")
         if lbl is not None:
             node_colors.append(get_color(lbl, cmap_name="hsv"))
         else:
             node_colors.append(get_color(stable_hash(str(n)), cmap_name="hsv"))
+        node_vals.append(float(d.get("importance", 0.0)))
+
+    if node_vals:
+        nmin, nmax = float(np.min(node_vals)), float(np.max(node_vals))
+        if np.isclose(nmax, nmin):
+            node_strength = [1.0 for _ in node_vals] if nmax > 0 else [0.0 for _ in node_vals]
+        else:
+            node_norm = Normalize(vmin=nmin, vmax=nmax)
+            node_strength = [float(np.power(node_norm(v), 0.55)) for v in node_vals]
+    else:
+        node_strength = []
+    ns_min, ns_max = node_size_range
+    node_sizes = [
+        ns_min + (ns_max - ns_min) * strength
+        for strength in (node_strength or [0.0 for _ in graph.nodes()])
+    ]
 
     nx.draw_networkx_nodes(
         graph,
         pos,
-        node_size=80,
+        node_size=node_sizes,
         node_color=node_colors,
         edgecolors="black",
-        linewidths=0.5,
+        linewidths=0.9,
         ax=ax,
     )
     if edges:
@@ -222,8 +243,9 @@ def plot_graph_node_saliency_with_estimator(
     node_agg: str = "max", #node_agg: Aggregation strategy over interpretation nodes ("max", "mean", "sum").
     edge_stat: str = "mean", #edge_stat: Edge aggregation ("mean", "min", "max").
     cmap: str = "YlOrRd",
-    color_value_range: Tuple[float, float] = (0.25, 1.0),
-    width_range: Tuple[float, float] = (2.0, 7.5),
+    color_value_range: Tuple[float, float] = (0.18, 1.0),
+    width_range: Tuple[float, float] = (1.5, 9.0),
+    node_size_range: Tuple[float, float] = (140.0, 280.0),
     size: Tuple[float, float] = (7, 6),
     ax: Optional[plt.Axes] = None,
     show: bool = True,
@@ -239,6 +261,7 @@ def plot_graph_node_saliency_with_estimator(
         cmap: Matplotlib colormap name.
         color_value_range: Range of normalized color values to use.
         width_range: Min/max edge widths.
+        node_size_range: Min/max node sizes.
         size: Figure size when creating a new axis.
         ax: Optional axis to draw into.
         show: Whether to show the figure when a new axis is created.
@@ -257,6 +280,7 @@ def plot_graph_node_saliency_with_estimator(
         cmap=cmap,
         color_value_range=color_value_range,
         width_range=width_range,
+        node_size_range=node_size_range,
         size=size,
         ax=ax,
         show=show,
