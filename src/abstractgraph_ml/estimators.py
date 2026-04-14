@@ -186,27 +186,114 @@ class GraphEstimator(BaseEstimator):
         Returns:
             Self for chaining.
         """
+        self._initialize_fit_state()
+
+        raw_features = self.transformer_.fit_transform(graphs, targets)
+        self._fit_estimator(raw_features, targets)
+        self._update_selection_and_manifold(raw_features, targets)
+        return self._mark_fitted()
+
+    def partial_fit(self, graphs, targets: Optional[Any] = None, **kwargs) -> "GraphEstimator":
+        """Incrementally fit the downstream estimator when supported.
+
+        This method keeps the fitted transformer state after the first batch so
+        future updates can reuse ``transform(...)`` output directly. If the
+        downstream estimator exposes ``partial_fit``, that is used directly.
+        Otherwise, already-vectorized batches are cached and the estimator is
+        refit on the concatenated feature matrix each time.
+
+        Args:
+            graphs: Input graphs.
+            targets: Optional target labels or regression targets.
+            **kwargs: Forwarded to the wrapped estimator's ``partial_fit``.
+
+        Returns:
+            Self for chaining.
+        """
+        fitted = self._is_graph_estimator_fitted()
+
+        if not fitted:
+            self._initialize_fit_state()
+            raw_features = self.transformer_.fit_transform(graphs, targets)
+        else:
+            raw_features = self._transform_raw(graphs)
+
+        estimator = self._ensure_estimator_for_fit(targets)
+        raw_features = np.asarray(raw_features)
+        if hasattr(estimator, "partial_fit"):
+            estimator.partial_fit(raw_features, targets, **kwargs)
+        else:
+            self._append_replay_batch(raw_features, targets)
+            estimator.fit(self.replay_raw_features_, self.replay_targets_)
+
+        manifold_targets = targets
+        if not hasattr(estimator, "partial_fit"):
+            raw_features = self.replay_raw_features_
+            manifold_targets = self.replay_targets_
+
+        self._update_selection_and_manifold(raw_features, manifold_targets, incremental=fitted)
+        return self._mark_fitted()
+
+    def _initialize_fit_state(self) -> None:
         # Copy components so successive fits do not share state.
         self.transformer_ = deepcopy(self.transformer)
         self.estimator_ = deepcopy(self.estimator) if self.estimator is not None else None
         self.manifold_ = deepcopy(self.manifold) if self.manifold is not None else None
-
-        # Reset learned selection indices for this fit
         self.selected_feature_indices_: Optional[np.ndarray] = None
+        self.replay_raw_features_ = None
+        self.replay_targets_ = None
 
-        raw_features = self.transformer_.fit_transform(graphs, targets)
+    def _is_graph_estimator_fitted(self) -> bool:
+        try:
+            check_is_fitted(self, "_is_fitted")
+            return True
+        except Exception:
+            return False
 
-        # Estimator always receives the raw transformer output.
+    def _ensure_estimator_for_fit(self, targets: Optional[Any]):
         if self.estimator_ is None:
-            # If targets are not provided, fall back to an unsupervised estimator
-            # that exposes predict_proba with outlier/inlier semantics.
             if targets is None:
                 self.estimator_ = IsolationForestProba()
             else:
                 raise ValueError(
                     "estimator is None; provide an estimator or set targets=None for unsupervised fit."
                 )
-        self.estimator_.fit(raw_features, targets)
+        return self.estimator_
+
+    def _fit_estimator(self, raw_features, targets: Optional[Any]) -> None:
+        estimator = self._ensure_estimator_for_fit(targets)
+        estimator.fit(raw_features, targets)
+
+    def _append_replay_batch(self, raw_features: np.ndarray, targets: Optional[Any]) -> None:
+        feature_batch = np.asarray(raw_features)
+        if self.replay_raw_features_ is None:
+            self.replay_raw_features_ = feature_batch.copy()
+        else:
+            self.replay_raw_features_ = np.concatenate(
+                [self.replay_raw_features_, feature_batch],
+                axis=0,
+            )
+
+        if targets is None:
+            return
+
+        target_batch = np.asarray(targets)
+        if self.replay_targets_ is None:
+            self.replay_targets_ = target_batch.copy()
+        else:
+            self.replay_targets_ = np.concatenate(
+                [np.asarray(self.replay_targets_), target_batch],
+                axis=0,
+            )
+
+    def _update_selection_and_manifold(
+        self,
+        raw_features,
+        targets: Optional[Any],
+        *,
+        incremental: bool = False,
+    ) -> None:
+        raw_features = np.asarray(raw_features)
 
         # Decide how many features to select (if any) and compute indices based on estimator importances.
         k = self._resolve_n_selected_features(raw_features.shape[1])
@@ -214,10 +301,14 @@ class GraphEstimator(BaseEstimator):
             idx = self._compute_feature_selection_indices(k)
             self.selected_feature_indices_ = idx if idx is not None else None
 
-        # Fit manifold on selected subset if manifold present
         if self.manifold_ is not None:
-            feats_for_manifold = self._apply_feature_selection(np.asarray(raw_features))
-            self.manifold_.fit(feats_for_manifold, targets)
+            feats_for_manifold = self._apply_feature_selection(raw_features)
+            if incremental and hasattr(self.manifold_, "partial_fit"):
+                self.manifold_.partial_fit(feats_for_manifold, targets)
+            else:
+                self.manifold_.fit(feats_for_manifold, targets)
+
+    def _mark_fitted(self) -> "GraphEstimator":
         self._is_fitted = True
         return self
 
@@ -268,6 +359,8 @@ class GraphEstimator(BaseEstimator):
             Indices of selected features, or None if unavailable.
         """
         est = self.estimator_
+        if est is None:
+            est = getattr(self, "estimator", None)
         if est is None:
             return None
         importances = self._extract_feature_importances(est)
