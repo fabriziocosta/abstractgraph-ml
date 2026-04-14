@@ -10,10 +10,11 @@ GraphEstimator and downstream selection.
 from copy import deepcopy
 from typing import Any, Optional, Sequence, Union
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+from scipy.sparse import issparse, vstack
 from sklearn.base import BaseEstimator
-from sklearn.decomposition import PCA
+from sklearn.decomposition import TruncatedSVD
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
 from sklearn.utils.validation import check_is_fitted
 
@@ -63,6 +64,39 @@ class IsolationForestProba:
         return np.vstack([p_out, p_in]).T
 
 
+class DropFirstTruncatedSVD:
+    """Sparse-friendly default manifold that drops the leading component."""
+
+    def __init__(self, n_components: int = 3, random_state: int = 0) -> None:
+        self.n_components = int(n_components)
+        self.random_state = random_state
+        self.model_: Optional[TruncatedSVD] = None
+        self.effective_n_components_: Optional[int] = None
+
+    def fit(self, X, y=None):
+        n_features = int(X.shape[1])
+        if n_features < 2:
+            self.model_ = None
+            self.effective_n_components_ = 0
+            return self
+        effective_n_components = max(1, min(self.n_components, n_features))
+        self.model_ = TruncatedSVD(
+            n_components=effective_n_components,
+            random_state=self.random_state,
+        )
+        self.model_.fit(X, y)
+        self.effective_n_components_ = effective_n_components
+        return self
+
+    def transform(self, X):
+        if self.model_ is None:
+            return X.toarray() if issparse(X) else np.asarray(X)
+        transformed = self.model_.transform(X)
+        if transformed.shape[1] > 1:
+            return transformed[:, 1:]
+        return transformed
+
+
 class GraphEstimator(BaseEstimator):
     """
     A lightweight pipeline for graph learning with optional feature selection.
@@ -73,7 +107,8 @@ class GraphEstimator(BaseEstimator):
     1) ``transformer``: an ``AbstractGraphTransformer`` that converts input
        graphs into a 2D feature matrix.
     2) ``manifold`` (optional): a dimensionality‑reduction (or any transformer
-       with ``fit``/``transform``) applied to features. Defaults to ``PCA()``.
+       with ``fit``/``transform``) applied to features. Defaults to a
+       sparse-friendly ``TruncatedSVD`` wrapper that drops the first component.
     3) ``estimator`` (optional): a downstream predictor/classifier/regressor
        trained on the raw features (pre‑manifold).
 
@@ -93,10 +128,12 @@ class GraphEstimator(BaseEstimator):
         linear models), those signals are used to rank features when
         ``n_selected_features`` is not ``None``. If absent, feature selection is
         skipped silently.
-    manifold : Optional[Any], default PCA()
+    manifold : Optional[Any], default sparse-friendly TruncatedSVD
         Any object providing ``fit``/``transform`` on feature matrices (e.g.,
-        PCA/UMAP/TSNE). When feature selection is active, the manifold is fit
-        on the selected subset of features; otherwise on all raw features.
+        TruncatedSVD/UMAP/TSNE). When feature selection is active, the manifold
+        is fit on the selected subset of features; otherwise on all raw
+        features. The default manifold fits a sparse-friendly TruncatedSVD and
+        returns components from the second onward.
     n_selected_features : Optional[int | float], default 0.1
         Controls optional feature selection based on the downstream estimator's
         importances/coefficients.
@@ -130,12 +167,12 @@ class GraphEstimator(BaseEstimator):
 
     Examples
     --------
-    Train a model, fit PCA on the top 20% most important features as given by a
-    RandomForest, and visualize the 2D manifold embedding:
+    Train a model, fit TruncatedSVD on the top 20% most important features as
+    given by a RandomForest, and visualize the 2D manifold embedding:
 
     >>> est = GraphEstimator(transformer=vec,
     ...                      estimator=RandomForestClassifier(random_state=0),
-    ...                      manifold=PCA(n_components=2),
+    ...                      manifold=TruncatedSVD(n_components=2, random_state=0),
     ...                      n_selected_features=0.2)
     >>> est.fit(graphs, y)
     >>> Z = est.transform(graphs)  # manifold on selected features
@@ -162,7 +199,7 @@ class GraphEstimator(BaseEstimator):
         """
         self.transformer = transformer
         self.estimator = estimator
-        self.manifold = manifold if manifold is not None else PCA()
+        self.manifold = manifold if manifold is not None else DropFirstTruncatedSVD()
         # Optional feature selection based on downstream estimator importance
         # None disables selection. If int -> select exactly that many features.
         # If float in (0,1) -> fraction of input feature count.
@@ -219,7 +256,7 @@ class GraphEstimator(BaseEstimator):
             raw_features = self._transform_raw(graphs)
 
         estimator = self._ensure_estimator_for_fit(targets)
-        raw_features = np.asarray(raw_features)
+        raw_features = self._normalize_feature_matrix(raw_features)
         if hasattr(estimator, "partial_fit"):
             estimator.partial_fit(raw_features, targets, **kwargs)
         else:
@@ -265,9 +302,13 @@ class GraphEstimator(BaseEstimator):
         estimator.fit(raw_features, targets)
 
     def _append_replay_batch(self, raw_features: np.ndarray, targets: Optional[Any]) -> None:
-        feature_batch = np.asarray(raw_features)
+        feature_batch = self._normalize_feature_matrix(raw_features)
         if self.replay_raw_features_ is None:
             self.replay_raw_features_ = feature_batch.copy()
+        elif issparse(self.replay_raw_features_) or issparse(feature_batch):
+            self.replay_raw_features_ = vstack(
+                [self._to_csr(self.replay_raw_features_), self._to_csr(feature_batch)]
+            )
         else:
             self.replay_raw_features_ = np.concatenate(
                 [self.replay_raw_features_, feature_batch],
@@ -293,7 +334,7 @@ class GraphEstimator(BaseEstimator):
         *,
         incremental: bool = False,
     ) -> None:
-        raw_features = np.asarray(raw_features)
+        raw_features = self._normalize_feature_matrix(raw_features)
 
         # Decide how many features to select (if any) and compute indices based on estimator importances.
         k = self._resolve_n_selected_features(raw_features.shape[1])
@@ -311,6 +352,16 @@ class GraphEstimator(BaseEstimator):
     def _mark_fitted(self) -> "GraphEstimator":
         self._is_fitted = True
         return self
+
+    def _normalize_feature_matrix(self, features):
+        if issparse(features):
+            return features.tocsr()
+        return np.asarray(features)
+
+    def _to_csr(self, features):
+        if issparse(features):
+            return features.tocsr()
+        return self._normalize_feature_matrix(features)
 
     def _transform_raw(self, graphs):
         """Transform graphs to raw feature vectors.
@@ -515,7 +566,7 @@ class GraphEstimator(BaseEstimator):
         """
         raw_features = self._transform_raw(graphs)
         # Apply feature selection before manifold projection
-        selected = self._apply_feature_selection(np.asarray(raw_features))
+        selected = self._apply_feature_selection(self._normalize_feature_matrix(raw_features))
         if self.manifold_ is not None:
             return self.manifold_.transform(selected)
         return selected
