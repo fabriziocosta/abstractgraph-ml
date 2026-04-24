@@ -490,9 +490,11 @@ class FeasibilityEstimatorFeatureCannotExist(object):
         return bool(self.cannot_exist_features_vec[label_int])
 
     def _mapped_subgraph_edge_set(self, mapped_subgraph) -> FrozenSet[Edge]:
-        """Return a stable undirected edge-set view for a mapped base subgraph."""
+        """Return a stable edge-set view for a mapped base subgraph."""
         if mapped_subgraph is None:
             return frozenset()
+        if mapped_subgraph.is_directed():
+            return frozenset((u, v) for u, v in mapped_subgraph.edges())
         return frozenset((min(u, v), max(u, v)) for u, v in mapped_subgraph.edges())
 
     def _mapped_subgraph_node_set(self, mapped_subgraph) -> FrozenSet[Node]:
