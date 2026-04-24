@@ -151,3 +151,8 @@ python -m pip install -e ../abstractgraph --no-deps
 python -m pip install -e . --no-deps
 python scripts/smoke_test.py
 ```
+
+## Ecosystem
+
+See the [AbstractGraph ecosystem README](../../README.md) for how this
+repository fits with the sibling repositories.
