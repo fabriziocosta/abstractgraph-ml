@@ -34,14 +34,61 @@ For the semantic role of this repository, see [../README.md](../README.md).
 - Example notebooks bootstrap imports and working directory automatically for
   the standard ecosystem layout.
 
-## Dependency
+## Install
+
+Standalone editable install, after `abstractgraph` is available from PyPI or a
+local editable checkout:
+
+```bash
+python -m pip install -e .
+```
+
+Inside the `abstractgraph-ecosystem` superproject, install the sibling core
+package first:
+
+```bash
+python -m pip install -e repos/abstractgraph --no-deps
+python -m pip install -e repos/abstractgraph-ml --no-deps
+```
+
+For notebook execution, include the notebook extra:
+
+```bash
+python -m pip install -e '.[notebooks]'
+```
+
+## Dependencies
+
+Sibling dependency:
 
 - `abstractgraph`
+
+Runtime dependencies declared in `pyproject.toml`:
+
+- `matplotlib`
+- `numpy`
+- `pandas`
+- `scikit-learn`
+
+Optional notebook dependencies:
+
+- `ipykernel`
+- `nbclient`
+- `nbformat`
+
+## Caveats
+
+- This package assumes the core `abstractgraph` package provides graph
+  decomposition, hashing, and vectorization primitives.
+- Estimator APIs follow scikit-learn conventions where practical; callers
+  should expect NumPy/pandas/scikit-learn data contracts at the ML boundary.
+- Install sibling packages with `--no-deps` only when the shared ecosystem
+  environment already contains the runtime dependencies.
 
 ## Local Validation
 
 ```bash
-python -m pip install -e ../abstractgraph --no-deps
-python -m pip install -e . --no-deps
+python -m pip install -e ../abstractgraph
+python -m pip install -e .
 python scripts/smoke_test.py
 ```
