@@ -44,6 +44,28 @@ class _ReplayFitRegressor:
         return np.zeros(len(X), dtype=float)
 
 
+class _BinaryDecisionEstimator:
+    classes_ = np.asarray([0, 1])
+
+    def fit(self, X, y):
+        return self
+
+    def decision_function(self, X):
+        X = np.asarray(X, dtype=float)
+        return X[:, 0]
+
+
+class _MulticlassDecisionEstimator:
+    classes_ = np.asarray(["a", "b", "c"])
+
+    def fit(self, X, y):
+        return self
+
+    def decision_function(self, X):
+        X = np.asarray(X, dtype=float)
+        return np.column_stack([-X[:, 0], np.zeros(X.shape[0]), X[:, 0]])
+
+
 class _SparseCountingTransformer:
     def __init__(self):
         self.fit_transform_calls = 0
@@ -171,3 +193,35 @@ def test_graph_estimator_default_manifold_uses_truncated_svd_and_drops_first_com
     assert isinstance(graph_estimator.manifold_, DropFirstTruncatedSVD)
     transformed = graph_estimator.transform([1.0, 2.0, 3.0])
     assert transformed.shape == (3, 2)
+
+
+def test_graph_estimator_predict_proba_uses_binary_decision_function_fallback() -> None:
+    graph_estimator = GraphEstimator(
+        transformer=_CountingTransformer(),
+        estimator=_BinaryDecisionEstimator(),
+        manifold=None,
+    )
+    graph_estimator.fit([-1.0, 1.0], [0, 1])
+
+    probs = graph_estimator.predict_proba([-2.0, 0.0, 2.0])
+
+    assert probs.shape == (3, 2)
+    np.testing.assert_allclose(np.sum(probs, axis=1), np.ones(3))
+    np.testing.assert_allclose(probs[1], np.asarray([0.5, 0.5]))
+    assert probs[0, 1] < 0.5
+    assert probs[2, 1] > 0.5
+
+
+def test_graph_estimator_predict_proba_uses_multiclass_decision_function_fallback() -> None:
+    graph_estimator = GraphEstimator(
+        transformer=_CountingTransformer(),
+        estimator=_MulticlassDecisionEstimator(),
+        manifold=None,
+    )
+    graph_estimator.fit([-1.0, 0.0, 1.0], ["a", "b", "c"])
+
+    probs = graph_estimator.predict_proba([2.0])
+
+    assert probs.shape == (1, 3)
+    np.testing.assert_allclose(np.sum(probs, axis=1), np.ones(1))
+    assert probs[0, 2] > probs[0, 1] > probs[0, 0]

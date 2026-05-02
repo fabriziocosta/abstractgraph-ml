@@ -597,13 +597,63 @@ class GraphEstimator(BaseEstimator):
         """
         if self.estimator_ is None:
             raise AttributeError("Estimator is None; provide an estimator to use predict_proba.")
-        if not hasattr(self.estimator_, "predict_proba"):
-            raise AttributeError("Underlying estimator does not implement predict_proba.")
         raw_features = self._transform_raw(graphs)
-        probs = self.estimator_.predict_proba(raw_features)
+        if hasattr(self.estimator_, "predict_proba"):
+            probs = self.estimator_.predict_proba(raw_features)
+        elif hasattr(self.estimator_, "decision_function"):
+            probs = self._decision_function_to_proba(
+                self.estimator_.decision_function(raw_features)
+            )
+        else:
+            raise AttributeError(
+                "Underlying estimator does not implement predict_proba or decision_function."
+            )
         if log:
             return np.log(probs)
         return probs
+
+    def _decision_function_to_proba(self, scores):
+        """Convert classifier decision scores to probability-like outputs."""
+        scores = np.asarray(scores, dtype=float)
+        classes = getattr(self.estimator_, "classes_", None)
+        n_classes = len(classes) if classes is not None else None
+
+        if scores.ndim == 1 or (scores.ndim == 2 and scores.shape[1] == 1):
+            if n_classes is not None and n_classes != 2:
+                raise AttributeError(
+                    "Underlying estimator decision_function is binary but classes_ "
+                    f"contains {n_classes} classes."
+                )
+            positive_scores = scores.reshape(-1)
+            p_positive = self._sigmoid(positive_scores)
+            return np.vstack([1.0 - p_positive, p_positive]).T
+
+        if scores.ndim != 2:
+            raise AttributeError(
+                "Underlying estimator decision_function must return a 1D or 2D array."
+            )
+        if n_classes is not None and scores.shape[1] != n_classes:
+            raise AttributeError(
+                "Underlying estimator decision_function output does not match classes_."
+            )
+        return self._softmax(scores)
+
+    @staticmethod
+    def _sigmoid(values):
+        values = np.asarray(values, dtype=float)
+        out = np.empty_like(values, dtype=float)
+        positive = values >= 0
+        out[positive] = 1.0 / (1.0 + np.exp(-values[positive]))
+        exp_values = np.exp(values[~positive])
+        out[~positive] = exp_values / (1.0 + exp_values)
+        return out
+
+    @staticmethod
+    def _softmax(values):
+        values = np.asarray(values, dtype=float)
+        shifted = values - np.max(values, axis=1, keepdims=True)
+        exp_values = np.exp(shifted)
+        return exp_values / np.sum(exp_values, axis=1, keepdims=True)
 
     def plot(
         self,
