@@ -69,10 +69,11 @@ feature selection when a smaller graph representation is needed.
 
 1. Define an operator program in `abstractgraph`.
 2. Build a graph transformer or estimator around that decomposition.
-3. Train a classical or neural model in `abstractgraph-ml`.
-4. Optionally apply feasibility filtering to constrain admissible graphs.
-5. Inspect salient features or subgraphs with the importance utilities.
-6. Use top-k selection if a reduced structural feature space is needed.
+3. Optionally add a predictive preprocessor such as PCA, SVD, or rhoPCA.
+4. Train a classical or neural model in `abstractgraph-ml`.
+5. Optionally apply feasibility filtering to constrain admissible graphs.
+6. Inspect salient features or subgraphs with the importance utilities.
+7. Use top-k selection if a reduced structural feature space is needed.
 
 ## Ecosystem
 

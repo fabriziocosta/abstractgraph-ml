@@ -99,6 +99,37 @@ class _DenseThreeFeatureTransformer:
         return np.asarray(rows, dtype=float)
 
 
+class _SupervisedFirstTwoColumnsPreprocessor:
+    def __init__(self):
+        self.fit_targets_ = None
+        self.fit_shape_ = None
+
+    def fit(self, X, y=None):
+        self.fit_shape_ = X.shape
+        self.fit_targets_ = None if y is None else np.asarray(y).copy()
+        return self
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=float)
+        return X[:, :2]
+
+
+class _RecordingPredictor:
+    def __init__(self):
+        self.fit_X_ = None
+        self.fit_y_ = None
+        self.predict_X_ = None
+
+    def fit(self, X, y):
+        self.fit_X_ = np.asarray(X, dtype=float)
+        self.fit_y_ = np.asarray(y)
+        return self
+
+    def predict(self, X):
+        self.predict_X_ = np.asarray(X, dtype=float)
+        return np.zeros(self.predict_X_.shape[0], dtype=float)
+
+
 def test_graph_estimator_partial_fit_reuses_transformer_state() -> None:
     transformer = _CountingTransformer()
     estimator = _PartialFitRegressor()
@@ -183,16 +214,32 @@ def test_graph_estimator_partial_fit_preserves_csr_replay_batches() -> None:
     )
 
 
-def test_graph_estimator_default_manifold_uses_truncated_svd_and_drops_first_component() -> None:
+def test_graph_estimator_default_postprocessor_uses_truncated_svd_and_drops_first_component() -> None:
     transformer = _DenseThreeFeatureTransformer()
     estimator = _ReplayFitRegressor()
     graph_estimator = GraphEstimator(transformer=transformer, estimator=estimator)
 
     graph_estimator.fit([1.0, 2.0, 3.0], [0.1, 0.2, 0.3])
 
+    assert isinstance(graph_estimator.postprocessor_, DropFirstTruncatedSVD)
     assert isinstance(graph_estimator.manifold_, DropFirstTruncatedSVD)
     transformed = graph_estimator.transform([1.0, 2.0, 3.0])
     assert transformed.shape == (3, 2)
+
+
+def test_graph_estimator_manifold_alias_sets_postprocessor() -> None:
+    transformer = _DenseThreeFeatureTransformer()
+    estimator = _ReplayFitRegressor()
+    graph_estimator = GraphEstimator(
+        transformer=transformer,
+        estimator=estimator,
+        manifold=DropFirstTruncatedSVD(n_components=2),
+    )
+
+    graph_estimator.fit([1.0, 2.0, 3.0], [0.1, 0.2, 0.3])
+
+    assert isinstance(graph_estimator.postprocessor_, DropFirstTruncatedSVD)
+    assert graph_estimator.manifold_ is graph_estimator.postprocessor_
 
 
 def test_graph_estimator_predict_proba_uses_binary_decision_function_fallback() -> None:
@@ -225,3 +272,52 @@ def test_graph_estimator_predict_proba_uses_multiclass_decision_function_fallbac
     assert probs.shape == (1, 3)
     np.testing.assert_allclose(np.sum(probs, axis=1), np.ones(1))
     assert probs[0, 2] > probs[0, 1] > probs[0, 0]
+
+
+def test_graph_estimator_preprocessor_fits_with_targets_before_estimator() -> None:
+    preprocessor = _SupervisedFirstTwoColumnsPreprocessor()
+    estimator = _RecordingPredictor()
+    graph_estimator = GraphEstimator(
+        transformer=_DenseThreeFeatureTransformer(),
+        estimator=estimator,
+        preprocessor=preprocessor,
+        manifold=None,
+    )
+
+    graph_estimator.fit([1.0, 2.0, 3.0], [0, 1, 1])
+    preds = graph_estimator.predict([4.0])
+
+    assert preds.shape == (1,)
+    assert graph_estimator.preprocessor_.fit_shape_ == (3, 3)
+    np.testing.assert_array_equal(
+        graph_estimator.preprocessor_.fit_targets_,
+        np.asarray([0, 1, 1]),
+    )
+    np.testing.assert_allclose(
+        graph_estimator.estimator_.fit_X_,
+        np.asarray([[1.0, 1.0], [2.0, 4.0], [3.0, 9.0]], dtype=float),
+    )
+    np.testing.assert_allclose(
+        graph_estimator.estimator_.predict_X_,
+        np.asarray([[4.0, 16.0]], dtype=float),
+    )
+
+
+def test_graph_estimator_partial_fit_refits_preprocessor_on_replay() -> None:
+    preprocessor = _SupervisedFirstTwoColumnsPreprocessor()
+    estimator = _ReplayFitRegressor()
+    graph_estimator = GraphEstimator(
+        transformer=_DenseThreeFeatureTransformer(),
+        estimator=estimator,
+        preprocessor=preprocessor,
+        manifold=None,
+    )
+
+    graph_estimator.partial_fit([1.0, 2.0], [0.1, 0.2])
+    graph_estimator.partial_fit([3.0], [0.3])
+
+    assert graph_estimator.preprocessor_.fit_shape_ == (3, 3)
+    np.testing.assert_allclose(
+        graph_estimator.estimator_.fit_calls[-1][0],
+        np.asarray([[1.0, 1.0], [2.0, 4.0], [3.0, 9.0]], dtype=float),
+    )

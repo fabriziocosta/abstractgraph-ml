@@ -65,7 +65,7 @@ class IsolationForestProba:
 
 
 class DropFirstTruncatedSVD:
-    """Sparse-friendly default manifold that drops the leading component."""
+    """Sparse-friendly default postprocessor that drops the leading component."""
 
     def __init__(self, n_components: int = 3, random_state: int = 0) -> None:
         self.n_components = int(n_components)
@@ -101,22 +101,24 @@ class GraphEstimator(BaseEstimator):
     """
     A lightweight pipeline for graph learning with optional feature selection.
 
-    The class mirrors scikit‑learn's estimator API and chains together three
+    The class mirrors scikit-learn's estimator API and chains together four
     stages:
 
     1) ``transformer``: an ``AbstractGraphTransformer`` that converts input
        graphs into a 2D feature matrix.
-    2) ``manifold`` (optional): a dimensionality‑reduction (or any transformer
+    2) ``preprocessor`` (optional): a scikit-learn compatible transformer fit on
+       graph features and applied before the downstream estimator.
+    3) ``postprocessor`` (optional): a dimensionality-reduction (or any transformer
        with ``fit``/``transform``) applied to features. Defaults to a
        sparse-friendly ``TruncatedSVD`` wrapper that drops the first component.
-    3) ``estimator`` (optional): a downstream predictor/classifier/regressor
-       trained on the raw features (pre‑manifold).
+    4) ``estimator`` (optional): a downstream predictor/classifier/regressor
+       trained on preprocessed features (pre-postprocessor).
 
     Feature selection (optional) can be enabled via ``n_selected_features`` and
     is driven by the downstream estimator's feature importances or coefficients
-    (when available). Selected features are used to fit and apply the manifold,
-    while the downstream estimator is always trained and evaluated on the raw
-    features to avoid feedback loops.
+    (when available). Selected features are used to fit and apply the
+    postprocessor, while the downstream estimator is always trained and
+    evaluated on the preprocessed features to avoid feedback loops.
 
     Parameters
     ----------
@@ -128,12 +130,15 @@ class GraphEstimator(BaseEstimator):
         linear models), those signals are used to rank features when
         ``n_selected_features`` is not ``None``. If absent, feature selection is
         skipped silently.
-    manifold : Optional[Any], default sparse-friendly TruncatedSVD
+    postprocessor : Optional[Any], default sparse-friendly TruncatedSVD
         Any object providing ``fit``/``transform`` on feature matrices (e.g.,
-        TruncatedSVD/UMAP/TSNE). When feature selection is active, the manifold
+        TruncatedSVD/UMAP/TSNE). When feature selection is active, the postprocessor
         is fit on the selected subset of features; otherwise on all raw
-        features. The default manifold fits a sparse-friendly TruncatedSVD and
-        returns components from the second onward.
+        features. The default postprocessor fits a sparse-friendly TruncatedSVD
+        and returns components from the second onward.
+    manifold : Optional[Any], default None
+        Deprecated alias for ``postprocessor``. When both are provided,
+        ``postprocessor`` takes precedence.
     n_selected_features : Optional[int | float], default 0.1
         Controls optional feature selection based on the downstream estimator's
         importances/coefficients.
@@ -146,12 +151,20 @@ class GraphEstimator(BaseEstimator):
 
         Notes on behavior:
         - Selection indices are computed after fitting the downstream estimator
-          on the raw features. If the estimator does not expose an importance
-          signal, selection is skipped and the full feature set is used.
-        - Selection is applied before the manifold both at ``fit`` time
-          (manifold.fit on selected features) and at ``transform`` time.
-        - The downstream estimator is always trained and evaluated on the raw
-          transformer features (no selection applied to ``predict``/``predict_proba``).
+          on the preprocessed features. If the estimator does not expose an
+          importance signal, selection is skipped and the full feature set is
+          used.
+        - Selection is applied before the postprocessor both at ``fit`` time
+          (postprocessor.fit on selected features) and at ``transform`` time.
+        - The downstream estimator is always trained and evaluated on the
+          preprocessed transformer features (no selection applied to
+          ``predict``/``predict_proba``).
+    preprocessor : Optional[Any], default None
+        Any scikit-learn compatible transformer providing ``fit``/``transform``
+        or ``fit_transform``. It is fit on the graph transformer's feature
+        matrix and may use ``targets`` for supervised transforms such as rhoPCA.
+        The downstream estimator, ``predict``, and ``predict_proba`` all use the
+        transformed representation.
 
     Attributes
     ----------
@@ -159,8 +172,12 @@ class GraphEstimator(BaseEstimator):
         Fitted copy of the provided transformer.
     estimator_ : Optional[BaseEstimator]
         Fitted copy of the downstream estimator (if provided).
+    preprocessor_ : Optional[Any]
+        Fitted copy of the preprocessor/transformer (if provided).
+    postprocessor_ : Optional[Any]
+        Fitted copy of the postprocessor/transformer (if provided).
     manifold_ : Optional[Any]
-        Fitted copy of the manifold/transformer (if provided).
+        Deprecated fitted alias for ``postprocessor_``.
     selected_feature_indices_ : Optional[np.ndarray]
         Array of column indices selected by feature selection, or ``None`` when
         selection is disabled or importances are unavailable.
@@ -168,15 +185,15 @@ class GraphEstimator(BaseEstimator):
     Examples
     --------
     Train a model, fit TruncatedSVD on the top 20% most important features as
-    given by a RandomForest, and visualize the 2D manifold embedding:
+    given by a RandomForest, and visualize the 2D postprocessed embedding:
 
     >>> est = GraphEstimator(transformer=vec,
     ...                      estimator=RandomForestClassifier(random_state=0),
-    ...                      manifold=TruncatedSVD(n_components=2, random_state=0),
+    ...                      postprocessor=TruncatedSVD(n_components=2, random_state=0),
     ...                      n_selected_features=0.2)
     >>> est.fit(graphs, y)
-    >>> Z = est.transform(graphs)  # manifold on selected features
-    >>> preds = est.predict(graphs)  # estimator uses raw features
+    >>> Z = est.transform(graphs)  # postprocessor on selected features
+    >>> preds = est.predict(graphs)  # estimator uses preprocessed features
     """
 
     def __init__(
@@ -185,21 +202,33 @@ class GraphEstimator(BaseEstimator):
         estimator: Optional[BaseEstimator] = None,
         manifold: Optional[Any] = None,
         n_selected_features: Optional[Union[int, float]] = None,
+        preprocessor: Optional[Any] = None,
+        postprocessor: Optional[Any] = None,
     ) -> None:
         """Initialize the graph estimator pipeline.
 
         Args:
             transformer: Graph-to-feature transformer.
-            estimator: Downstream estimator to fit on raw features.
-            manifold: Optional manifold/transformer applied after selection.
+            estimator: Downstream estimator to fit on preprocessed features.
+            manifold: Deprecated alias for postprocessor.
             n_selected_features: Optional feature selection specification.
+            preprocessor: Optional transformer applied before the estimator.
+            postprocessor: Optional transformer applied after feature selection.
 
         Returns:
             None.
         """
         self.transformer = transformer
         self.estimator = estimator
-        self.manifold = manifold if manifold is not None else DropFirstTruncatedSVD()
+        self.preprocessor = preprocessor
+        self.postprocessor = postprocessor
+        self.manifold = (
+            manifold
+            if manifold is not None
+            else postprocessor
+            if postprocessor is not None
+            else DropFirstTruncatedSVD()
+        )
         # Optional feature selection based on downstream estimator importance
         # None disables selection. If int -> select exactly that many features.
         # If float in (0,1) -> fraction of input feature count.
@@ -207,7 +236,7 @@ class GraphEstimator(BaseEstimator):
         self.n_selected_features = n_selected_features
 
     def fit(self, graphs, targets: Optional[Any] = None) -> "GraphEstimator":
-        """Fit the transformer, estimator, and manifold.
+        """Fit the transformer, estimator, and postprocessor.
 
         Supports both supervised and unsupervised modes:
         - Supervised: provide ``targets`` and an explicit downstream estimator.
@@ -226,8 +255,9 @@ class GraphEstimator(BaseEstimator):
         self._initialize_fit_state()
 
         raw_features = self.transformer_.fit_transform(graphs, targets)
-        self._fit_estimator(raw_features, targets)
-        self._update_selection_and_manifold(raw_features, targets)
+        estimator_features = self._fit_transform_preprocessor(raw_features, targets)
+        self._fit_estimator(estimator_features, targets)
+        self._update_selection_and_postprocessor(estimator_features, targets)
         return self._mark_fitted()
 
     def partial_fit(self, graphs, targets: Optional[Any] = None, **kwargs) -> "GraphEstimator":
@@ -256,26 +286,43 @@ class GraphEstimator(BaseEstimator):
             raw_features = self._transform_raw(graphs)
 
         estimator = self._ensure_estimator_for_fit(targets)
-        raw_features = self._normalize_feature_matrix(raw_features)
-        if hasattr(estimator, "partial_fit"):
-            estimator.partial_fit(raw_features, targets, **kwargs)
+        self._append_replay_batch(raw_features, targets)
+        if fitted and hasattr(estimator, "partial_fit"):
+            estimator_features = self._partial_fit_transform_preprocessor(
+                raw_features,
+                targets,
+            )
         else:
-            self._append_replay_batch(raw_features, targets)
-            estimator.fit(self.replay_raw_features_, self.replay_targets_)
+            estimator_features = self._fit_transform_preprocessor(
+                self.replay_raw_features_,
+                self.replay_targets_ if self.replay_targets_ is not None else targets,
+            )
+        if hasattr(estimator, "partial_fit"):
+            estimator.partial_fit(estimator_features, targets, **kwargs)
+        else:
+            estimator.fit(estimator_features, self.replay_targets_)
 
-        manifold_targets = targets
+        postprocessor_targets = targets
         if not hasattr(estimator, "partial_fit"):
-            raw_features = self.replay_raw_features_
-            manifold_targets = self.replay_targets_
+            estimator_features = self._transform_preprocessor(self.replay_raw_features_)
+            postprocessor_targets = self.replay_targets_
 
-        self._update_selection_and_manifold(raw_features, manifold_targets, incremental=fitted)
+        self._update_selection_and_postprocessor(
+            estimator_features,
+            postprocessor_targets,
+            incremental=fitted,
+        )
         return self._mark_fitted()
 
     def _initialize_fit_state(self) -> None:
         # Copy components so successive fits do not share state.
         self.transformer_ = deepcopy(self.transformer)
         self.estimator_ = deepcopy(self.estimator) if self.estimator is not None else None
-        self.manifold_ = deepcopy(self.manifold) if self.manifold is not None else None
+        self.preprocessor_ = (
+            deepcopy(self.preprocessor) if self.preprocessor is not None else None
+        )
+        self.postprocessor_ = deepcopy(self._resolve_postprocessor())
+        self.manifold_ = self.postprocessor_
         self.selected_feature_indices_: Optional[np.ndarray] = None
         self.replay_raw_features_ = None
         self.replay_targets_ = None
@@ -297,9 +344,41 @@ class GraphEstimator(BaseEstimator):
                 )
         return self.estimator_
 
-    def _fit_estimator(self, raw_features, targets: Optional[Any]) -> None:
+    def _fit_estimator(self, features, targets: Optional[Any]) -> None:
         estimator = self._ensure_estimator_for_fit(targets)
-        estimator.fit(raw_features, targets)
+        estimator.fit(features, targets)
+
+    def _fit_transform_preprocessor(self, raw_features, targets: Optional[Any]):
+        raw_features = self._normalize_feature_matrix(raw_features)
+        if self.preprocessor_ is None:
+            return raw_features
+        if hasattr(self.preprocessor_, "fit_transform"):
+            return self._normalize_feature_matrix(
+                self.preprocessor_.fit_transform(raw_features, targets)
+            )
+        self.preprocessor_.fit(raw_features, targets)
+        return self._normalize_feature_matrix(self.preprocessor_.transform(raw_features))
+
+    def _partial_fit_transform_preprocessor(self, raw_features, targets: Optional[Any]):
+        raw_features = self._normalize_feature_matrix(raw_features)
+        if self.preprocessor_ is None:
+            return raw_features
+        if hasattr(self.preprocessor_, "partial_fit"):
+            self.preprocessor_.partial_fit(raw_features, targets)
+        return self._normalize_feature_matrix(self.preprocessor_.transform(raw_features))
+
+    def _transform_preprocessor(self, raw_features):
+        raw_features = self._normalize_feature_matrix(raw_features)
+        if self.preprocessor_ is None:
+            return raw_features
+        return self._normalize_feature_matrix(self.preprocessor_.transform(raw_features))
+
+    def _resolve_postprocessor(self):
+        if self.postprocessor is not None:
+            return self.postprocessor
+        if self.manifold is not None:
+            return self.manifold
+        return DropFirstTruncatedSVD()
 
     def _append_replay_batch(self, raw_features: np.ndarray, targets: Optional[Any]) -> None:
         feature_batch = self._normalize_feature_matrix(raw_features)
@@ -327,7 +406,7 @@ class GraphEstimator(BaseEstimator):
                 axis=0,
             )
 
-    def _update_selection_and_manifold(
+    def _update_selection_and_postprocessor(
         self,
         raw_features,
         targets: Optional[Any],
@@ -342,12 +421,12 @@ class GraphEstimator(BaseEstimator):
             idx = self._compute_feature_selection_indices(k)
             self.selected_feature_indices_ = idx if idx is not None else None
 
-        if self.manifold_ is not None:
-            feats_for_manifold = self._apply_feature_selection(raw_features)
-            if incremental and hasattr(self.manifold_, "partial_fit"):
-                self.manifold_.partial_fit(feats_for_manifold, targets)
+        if self.postprocessor_ is not None:
+            feats_for_postprocessor = self._apply_feature_selection(raw_features)
+            if incremental and hasattr(self.postprocessor_, "partial_fit"):
+                self.postprocessor_.partial_fit(feats_for_postprocessor, targets)
             else:
-                self.manifold_.fit(feats_for_manifold, targets)
+                self.postprocessor_.fit(feats_for_postprocessor, targets)
 
     def _mark_fitted(self) -> "GraphEstimator":
         self._is_fitted = True
@@ -556,7 +635,7 @@ class GraphEstimator(BaseEstimator):
         return [int(active_idx[i]) for i in order]
 
     def transform(self, graphs):
-        """Transform graphs via the transformer and optional manifold.
+        """Transform graphs via the transformer and optional postprocessor.
 
         Args:
             graphs: Input graphs.
@@ -565,10 +644,11 @@ class GraphEstimator(BaseEstimator):
             Transformed feature matrix.
         """
         raw_features = self._transform_raw(graphs)
-        # Apply feature selection before manifold projection
-        selected = self._apply_feature_selection(self._normalize_feature_matrix(raw_features))
-        if self.manifold_ is not None:
-            return self.manifold_.transform(selected)
+        estimator_features = self._transform_preprocessor(raw_features)
+        # Apply feature selection before postprocessor projection.
+        selected = self._apply_feature_selection(estimator_features)
+        if self.postprocessor_ is not None:
+            return self.postprocessor_.transform(selected)
         return selected
 
     def predict(self, graphs):
@@ -582,8 +662,8 @@ class GraphEstimator(BaseEstimator):
         """
         if self.estimator_ is None:
             raise AttributeError("Estimator is None; provide an estimator to use predict.")
-        raw_features = self._transform_raw(graphs)
-        return self.estimator_.predict(raw_features)
+        estimator_features = self._transform_preprocessor(self._transform_raw(graphs))
+        return self.estimator_.predict(estimator_features)
 
     def predict_proba(self, graphs, log: bool = False):
         """Predict class probabilities using the downstream estimator.
@@ -597,12 +677,12 @@ class GraphEstimator(BaseEstimator):
         """
         if self.estimator_ is None:
             raise AttributeError("Estimator is None; provide an estimator to use predict_proba.")
-        raw_features = self._transform_raw(graphs)
+        estimator_features = self._transform_preprocessor(self._transform_raw(graphs))
         if hasattr(self.estimator_, "predict_proba"):
-            probs = self.estimator_.predict_proba(raw_features)
+            probs = self.estimator_.predict_proba(estimator_features)
         elif hasattr(self.estimator_, "decision_function"):
             probs = self._decision_function_to_proba(
-                self.estimator_.decision_function(raw_features)
+                self.estimator_.decision_function(estimator_features)
             )
         else:
             raise AttributeError(
@@ -663,7 +743,7 @@ class GraphEstimator(BaseEstimator):
         viewport_to_quantile: Optional[float] = None,
     ):
         """
-        Scatter plot of transformed features (uses manifold output if present).
+        Scatter plot of transformed features (uses postprocessor output if present).
 
         Args:
             graphs: Input graphs.

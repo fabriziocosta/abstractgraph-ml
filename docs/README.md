@@ -53,8 +53,10 @@ direction.
 
 1. Define a decomposition in `abstractgraph.operators`.
 2. Build an `AbstractGraphTransformer` or `AbstractGraphNodeTransformer`.
-3. Train a `GraphEstimator` or `NeuralGraphEstimator`.
-4. Inspect results with `importance` or `topk`.
+3. Optionally add a `GraphEstimator` preprocessor for PCA, SVD, rhoPCA, or
+   scaling before the downstream estimator.
+4. Train a `GraphEstimator` or `NeuralGraphEstimator`.
+5. Inspect results with `importance` or `topk`.
    `display_topk_feature_subgraphs(...)` is the shortest path from fitted
    feature ranking back to representative mapped subgraphs.
 
