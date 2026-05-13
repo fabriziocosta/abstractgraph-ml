@@ -3,19 +3,30 @@ from __future__ import annotations
 import networkx as nx
 import numpy as np
 
-from abstractgraph_ml.feasibility import FeasibilityEstimator, FeasibilityEstimatorFeatureCannotExist
+from abstractgraph_ml.feasibility import (
+    DEFAULT_EDGE_LABEL,
+    DEFAULT_NODE_LABEL,
+    FeasibilityEstimator,
+    FeasibilityEstimatorFeatureCannotExist,
+)
 
 
 class _RecordingEstimator:
     def __init__(self, predictions):
         self.predictions = predictions
         self.calls = []
+        self.fit_calls = []
+        self.fit_graphs = []
+        self.predict_graphs = []
 
     def fit(self, graphs):
+        self.fit_calls.append(len(graphs))
+        self.fit_graphs.append(list(graphs))
         return self
 
     def predict(self, graphs):
         self.calls.append(len(graphs))
+        self.predict_graphs.append(list(graphs))
         return self.predictions[: len(graphs)]
 
 
@@ -131,6 +142,41 @@ def test_feasibility_number_of_violations_sums_violation_matrix():
     preds = estimator.number_of_violations(graphs)
 
     assert preds.tolist() == [3, 5, 7]
+
+
+def test_feasibility_fit_fills_missing_node_and_edge_labels():
+    graph = nx.Graph()
+    graph.add_node(0)
+    graph.add_node(1, label="b")
+    graph.add_edge(0, 1)
+    child = _RecordingEstimator([True])
+    estimator = FeasibilityEstimator([child])
+
+    estimator.fit([graph])
+
+    assert child.fit_calls == [1]
+    fit_graph = child.fit_graphs[0][0]
+    assert fit_graph.nodes[0]["label"] == DEFAULT_NODE_LABEL
+    assert fit_graph.nodes[1]["label"] == "b"
+    assert fit_graph.edges[0, 1]["label"] == DEFAULT_EDGE_LABEL
+    assert "label" not in graph.nodes[0]
+    assert "label" not in graph.edges[0, 1]
+
+
+def test_feasibility_predict_fills_missing_node_and_edge_labels():
+    graph = nx.Graph()
+    graph.add_node(0)
+    graph.add_node(1)
+    graph.add_edge(0, 1)
+    child = _RecordingEstimator([True])
+    estimator = FeasibilityEstimator([child])
+
+    preds = estimator.predict([graph])
+
+    assert preds.tolist() == [True]
+    predict_graph = child.predict_graphs[0][0]
+    assert predict_graph.nodes[0]["label"] == DEFAULT_NODE_LABEL
+    assert predict_graph.edges[0, 1]["label"] == DEFAULT_EDGE_LABEL
 
 
 def test_feature_cannot_exist_violating_edge_sets_returns_one_list_per_graph():
