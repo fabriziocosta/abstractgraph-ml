@@ -74,8 +74,9 @@ class DropFirstTruncatedSVD:
         self.effective_n_components_: Optional[int] = None
 
     def fit(self, X, y=None):
+        n_samples = int(X.shape[0])
         n_features = int(X.shape[1])
-        if n_features < 2:
+        if n_samples < 2 or n_features < 2 or self._total_variance(X) <= 0.0:
             self.model_ = None
             self.effective_n_components_ = 0
             return self
@@ -87,6 +88,16 @@ class DropFirstTruncatedSVD:
         self.model_.fit(X, y)
         self.effective_n_components_ = effective_n_components
         return self
+
+    @staticmethod
+    def _total_variance(X) -> float:
+        if issparse(X):
+            mean = np.asarray(X.mean(axis=0)).ravel()
+            mean_square = np.asarray(X.power(2).mean(axis=0)).ravel()
+            variances = mean_square - mean**2
+        else:
+            variances = np.var(np.asarray(X), axis=0)
+        return float(np.sum(np.maximum(variances, 0.0)))
 
     def transform(self, X):
         if self.model_ is None:
@@ -435,7 +446,10 @@ class GraphEstimator(BaseEstimator):
     def _normalize_feature_matrix(self, features):
         if issparse(features):
             return features.tocsr()
-        return np.asarray(features)
+        matrix = np.asarray(features)
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(1, -1)
+        return matrix
 
     def _to_csr(self, features):
         if issparse(features):
