@@ -10,10 +10,11 @@ GraphEstimator and downstream selection.
 from copy import deepcopy
 from typing import Any, Optional, Sequence, Union
 
-import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.base import BaseEstimator
-from sklearn.decomposition import PCA
+import numpy as np
+from scipy.sparse import issparse, vstack
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.decomposition import TruncatedSVD
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
 from sklearn.utils.validation import check_is_fitted
 
@@ -63,25 +64,72 @@ class IsolationForestProba:
         return np.vstack([p_out, p_in]).T
 
 
+class DropFirstTruncatedSVD:
+    """Sparse-friendly default postprocessor that drops the leading component."""
+
+    def __init__(self, n_components: int = 3, random_state: int = 0) -> None:
+        self.n_components = int(n_components)
+        self.random_state = random_state
+        self.model_: Optional[TruncatedSVD] = None
+        self.effective_n_components_: Optional[int] = None
+
+    def fit(self, X, y=None):
+        n_samples = int(X.shape[0])
+        n_features = int(X.shape[1])
+        if n_samples < 2 or n_features < 2 or self._total_variance(X) <= 0.0:
+            self.model_ = None
+            self.effective_n_components_ = 0
+            return self
+        effective_n_components = max(1, min(self.n_components, n_features))
+        self.model_ = TruncatedSVD(
+            n_components=effective_n_components,
+            random_state=self.random_state,
+        )
+        self.model_.fit(X, y)
+        self.effective_n_components_ = effective_n_components
+        return self
+
+    @staticmethod
+    def _total_variance(X) -> float:
+        if issparse(X):
+            mean = np.asarray(X.mean(axis=0)).ravel()
+            mean_square = np.asarray(X.power(2).mean(axis=0)).ravel()
+            variances = mean_square - mean**2
+        else:
+            variances = np.var(np.asarray(X), axis=0)
+        return float(np.sum(np.maximum(variances, 0.0)))
+
+    def transform(self, X):
+        if self.model_ is None:
+            return X.toarray() if issparse(X) else np.asarray(X)
+        transformed = self.model_.transform(X)
+        if transformed.shape[1] > 1:
+            return transformed[:, 1:]
+        return transformed
+
+
 class GraphEstimator(BaseEstimator):
     """
     A lightweight pipeline for graph learning with optional feature selection.
 
-    The class mirrors scikit‑learn's estimator API and chains together three
+    The class mirrors scikit-learn's estimator API and chains together four
     stages:
 
     1) ``transformer``: an ``AbstractGraphTransformer`` that converts input
        graphs into a 2D feature matrix.
-    2) ``manifold`` (optional): a dimensionality‑reduction (or any transformer
-       with ``fit``/``transform``) applied to features. Defaults to ``PCA()``.
-    3) ``estimator`` (optional): a downstream predictor/classifier/regressor
-       trained on the raw features (pre‑manifold).
+    2) ``preprocessor`` (optional): a scikit-learn compatible transformer fit on
+       graph features and applied before the downstream estimator.
+    3) ``postprocessor`` (optional): a dimensionality-reduction (or any transformer
+       with ``fit``/``transform``) applied to features. Defaults to a
+       sparse-friendly ``TruncatedSVD`` wrapper that drops the first component.
+    4) ``estimator`` (optional): a downstream predictor/classifier/regressor
+       trained on preprocessed features (pre-postprocessor).
 
     Feature selection (optional) can be enabled via ``n_selected_features`` and
     is driven by the downstream estimator's feature importances or coefficients
-    (when available). Selected features are used to fit and apply the manifold,
-    while the downstream estimator is always trained and evaluated on the raw
-    features to avoid feedback loops.
+    (when available). Selected features are used to fit and apply the
+    postprocessor, while the downstream estimator is always trained and
+    evaluated on the preprocessed features to avoid feedback loops.
 
     Parameters
     ----------
@@ -93,10 +141,15 @@ class GraphEstimator(BaseEstimator):
         linear models), those signals are used to rank features when
         ``n_selected_features`` is not ``None``. If absent, feature selection is
         skipped silently.
-    manifold : Optional[Any], default PCA()
+    postprocessor : Optional[Any], default sparse-friendly TruncatedSVD
         Any object providing ``fit``/``transform`` on feature matrices (e.g.,
-        PCA/UMAP/TSNE). When feature selection is active, the manifold is fit
-        on the selected subset of features; otherwise on all raw features.
+        TruncatedSVD/UMAP/TSNE). When feature selection is active, the postprocessor
+        is fit on the selected subset of features; otherwise on all raw
+        features. The default postprocessor fits a sparse-friendly TruncatedSVD
+        and returns components from the second onward.
+    manifold : Optional[Any], default None
+        Deprecated alias for ``postprocessor``. When both are provided,
+        ``postprocessor`` takes precedence.
     n_selected_features : Optional[int | float], default 0.1
         Controls optional feature selection based on the downstream estimator's
         importances/coefficients.
@@ -109,12 +162,20 @@ class GraphEstimator(BaseEstimator):
 
         Notes on behavior:
         - Selection indices are computed after fitting the downstream estimator
-          on the raw features. If the estimator does not expose an importance
-          signal, selection is skipped and the full feature set is used.
-        - Selection is applied before the manifold both at ``fit`` time
-          (manifold.fit on selected features) and at ``transform`` time.
-        - The downstream estimator is always trained and evaluated on the raw
-          transformer features (no selection applied to ``predict``/``predict_proba``).
+          on the preprocessed features. If the estimator does not expose an
+          importance signal, selection is skipped and the full feature set is
+          used.
+        - Selection is applied before the postprocessor both at ``fit`` time
+          (postprocessor.fit on selected features) and at ``transform`` time.
+        - The downstream estimator is always trained and evaluated on the
+          preprocessed transformer features (no selection applied to
+          ``predict``/``predict_proba``).
+    preprocessor : Optional[Any], default None
+        Any scikit-learn compatible transformer providing ``fit``/``transform``
+        or ``fit_transform``. It is fit on the graph transformer's feature
+        matrix and may use ``targets`` for supervised transforms such as rhoPCA.
+        The downstream estimator, ``predict``, and ``predict_proba`` all use the
+        transformed representation.
 
     Attributes
     ----------
@@ -122,24 +183,28 @@ class GraphEstimator(BaseEstimator):
         Fitted copy of the provided transformer.
     estimator_ : Optional[BaseEstimator]
         Fitted copy of the downstream estimator (if provided).
+    preprocessor_ : Optional[Any]
+        Fitted copy of the preprocessor/transformer (if provided).
+    postprocessor_ : Optional[Any]
+        Fitted copy of the postprocessor/transformer (if provided).
     manifold_ : Optional[Any]
-        Fitted copy of the manifold/transformer (if provided).
+        Deprecated fitted alias for ``postprocessor_``.
     selected_feature_indices_ : Optional[np.ndarray]
         Array of column indices selected by feature selection, or ``None`` when
         selection is disabled or importances are unavailable.
 
     Examples
     --------
-    Train a model, fit PCA on the top 20% most important features as given by a
-    RandomForest, and visualize the 2D manifold embedding:
+    Train a model, fit TruncatedSVD on the top 20% most important features as
+    given by a RandomForest, and visualize the 2D postprocessed embedding:
 
     >>> est = GraphEstimator(transformer=vec,
     ...                      estimator=RandomForestClassifier(random_state=0),
-    ...                      manifold=PCA(n_components=2),
+    ...                      postprocessor=TruncatedSVD(n_components=2, random_state=0),
     ...                      n_selected_features=0.2)
     >>> est.fit(graphs, y)
-    >>> Z = est.transform(graphs)  # manifold on selected features
-    >>> preds = est.predict(graphs)  # estimator uses raw features
+    >>> Z = est.transform(graphs)  # postprocessor on selected features
+    >>> preds = est.predict(graphs)  # estimator uses preprocessed features
     """
 
     def __init__(
@@ -148,21 +213,33 @@ class GraphEstimator(BaseEstimator):
         estimator: Optional[BaseEstimator] = None,
         manifold: Optional[Any] = None,
         n_selected_features: Optional[Union[int, float]] = None,
+        preprocessor: Optional[Any] = None,
+        postprocessor: Optional[Any] = None,
     ) -> None:
         """Initialize the graph estimator pipeline.
 
         Args:
             transformer: Graph-to-feature transformer.
-            estimator: Downstream estimator to fit on raw features.
-            manifold: Optional manifold/transformer applied after selection.
+            estimator: Downstream estimator to fit on preprocessed features.
+            manifold: Deprecated alias for postprocessor.
             n_selected_features: Optional feature selection specification.
+            preprocessor: Optional transformer applied before the estimator.
+            postprocessor: Optional transformer applied after feature selection.
 
         Returns:
             None.
         """
         self.transformer = transformer
         self.estimator = estimator
-        self.manifold = manifold if manifold is not None else PCA()
+        self.preprocessor = preprocessor
+        self.postprocessor = postprocessor
+        self.manifold = (
+            manifold
+            if manifold is not None
+            else postprocessor
+            if postprocessor is not None
+            else DropFirstTruncatedSVD()
+        )
         # Optional feature selection based on downstream estimator importance
         # None disables selection. If int -> select exactly that many features.
         # If float in (0,1) -> fraction of input feature count.
@@ -170,7 +247,7 @@ class GraphEstimator(BaseEstimator):
         self.n_selected_features = n_selected_features
 
     def fit(self, graphs, targets: Optional[Any] = None) -> "GraphEstimator":
-        """Fit the transformer, estimator, and manifold.
+        """Fit the transformer, estimator, and postprocessor.
 
         Supports both supervised and unsupervised modes:
         - Supervised: provide ``targets`` and an explicit downstream estimator.
@@ -186,27 +263,168 @@ class GraphEstimator(BaseEstimator):
         Returns:
             Self for chaining.
         """
+        self._initialize_fit_state()
+
+        raw_features = self.transformer_.fit_transform(graphs, targets)
+        estimator_features = self._fit_transform_preprocessor(raw_features, targets)
+        self._fit_estimator(estimator_features, targets)
+        self._update_selection_and_postprocessor(estimator_features, targets)
+        return self._mark_fitted()
+
+    def partial_fit(self, graphs, targets: Optional[Any] = None, **kwargs) -> "GraphEstimator":
+        """Incrementally fit the downstream estimator when supported.
+
+        This method keeps the fitted transformer state after the first batch so
+        future updates can reuse ``transform(...)`` output directly. If the
+        downstream estimator exposes ``partial_fit``, that is used directly.
+        Otherwise, already-vectorized batches are cached and the estimator is
+        refit on the concatenated feature matrix each time.
+
+        Args:
+            graphs: Input graphs.
+            targets: Optional target labels or regression targets.
+            **kwargs: Forwarded to the wrapped estimator's ``partial_fit``.
+
+        Returns:
+            Self for chaining.
+        """
+        fitted = self._is_graph_estimator_fitted()
+
+        if not fitted:
+            self._initialize_fit_state()
+            raw_features = self.transformer_.fit_transform(graphs, targets)
+        else:
+            raw_features = self._transform_raw(graphs)
+
+        estimator = self._ensure_estimator_for_fit(targets)
+        self._append_replay_batch(raw_features, targets)
+        if fitted and hasattr(estimator, "partial_fit"):
+            estimator_features = self._partial_fit_transform_preprocessor(
+                raw_features,
+                targets,
+            )
+        else:
+            estimator_features = self._fit_transform_preprocessor(
+                self.replay_raw_features_,
+                self.replay_targets_ if self.replay_targets_ is not None else targets,
+            )
+        if hasattr(estimator, "partial_fit"):
+            estimator.partial_fit(estimator_features, targets, **kwargs)
+        else:
+            estimator.fit(estimator_features, self.replay_targets_)
+
+        postprocessor_targets = targets
+        if not hasattr(estimator, "partial_fit"):
+            estimator_features = self._transform_preprocessor(self.replay_raw_features_)
+            postprocessor_targets = self.replay_targets_
+
+        self._update_selection_and_postprocessor(
+            estimator_features,
+            postprocessor_targets,
+            incremental=fitted,
+        )
+        return self._mark_fitted()
+
+    def _initialize_fit_state(self) -> None:
         # Copy components so successive fits do not share state.
         self.transformer_ = deepcopy(self.transformer)
         self.estimator_ = deepcopy(self.estimator) if self.estimator is not None else None
-        self.manifold_ = deepcopy(self.manifold) if self.manifold is not None else None
-
-        # Reset learned selection indices for this fit
+        self.preprocessor_ = (
+            deepcopy(self.preprocessor) if self.preprocessor is not None else None
+        )
+        self.postprocessor_ = deepcopy(self._resolve_postprocessor())
+        self.manifold_ = self.postprocessor_
         self.selected_feature_indices_: Optional[np.ndarray] = None
+        self.replay_raw_features_ = None
+        self.replay_targets_ = None
 
-        raw_features = self.transformer_.fit_transform(graphs, targets)
+    def _is_graph_estimator_fitted(self) -> bool:
+        try:
+            check_is_fitted(self, "_is_fitted")
+            return True
+        except Exception:
+            return False
 
-        # Estimator always receives the raw transformer output.
+    def _ensure_estimator_for_fit(self, targets: Optional[Any]):
         if self.estimator_ is None:
-            # If targets are not provided, fall back to an unsupervised estimator
-            # that exposes predict_proba with outlier/inlier semantics.
             if targets is None:
                 self.estimator_ = IsolationForestProba()
             else:
                 raise ValueError(
                     "estimator is None; provide an estimator or set targets=None for unsupervised fit."
                 )
-        self.estimator_.fit(raw_features, targets)
+        return self.estimator_
+
+    def _fit_estimator(self, features, targets: Optional[Any]) -> None:
+        estimator = self._ensure_estimator_for_fit(targets)
+        estimator.fit(features, targets)
+
+    def _fit_transform_preprocessor(self, raw_features, targets: Optional[Any]):
+        raw_features = self._normalize_feature_matrix(raw_features)
+        if self.preprocessor_ is None:
+            return raw_features
+        if hasattr(self.preprocessor_, "fit_transform"):
+            return self._normalize_feature_matrix(
+                self.preprocessor_.fit_transform(raw_features, targets)
+            )
+        self.preprocessor_.fit(raw_features, targets)
+        return self._normalize_feature_matrix(self.preprocessor_.transform(raw_features))
+
+    def _partial_fit_transform_preprocessor(self, raw_features, targets: Optional[Any]):
+        raw_features = self._normalize_feature_matrix(raw_features)
+        if self.preprocessor_ is None:
+            return raw_features
+        if hasattr(self.preprocessor_, "partial_fit"):
+            self.preprocessor_.partial_fit(raw_features, targets)
+        return self._normalize_feature_matrix(self.preprocessor_.transform(raw_features))
+
+    def _transform_preprocessor(self, raw_features):
+        raw_features = self._normalize_feature_matrix(raw_features)
+        if self.preprocessor_ is None:
+            return raw_features
+        return self._normalize_feature_matrix(self.preprocessor_.transform(raw_features))
+
+    def _resolve_postprocessor(self):
+        if self.postprocessor is not None:
+            return self.postprocessor
+        if self.manifold is not None:
+            return self.manifold
+        return DropFirstTruncatedSVD()
+
+    def _append_replay_batch(self, raw_features: np.ndarray, targets: Optional[Any]) -> None:
+        feature_batch = self._normalize_feature_matrix(raw_features)
+        if self.replay_raw_features_ is None:
+            self.replay_raw_features_ = feature_batch.copy()
+        elif issparse(self.replay_raw_features_) or issparse(feature_batch):
+            self.replay_raw_features_ = vstack(
+                [self._to_csr(self.replay_raw_features_), self._to_csr(feature_batch)]
+            )
+        else:
+            self.replay_raw_features_ = np.concatenate(
+                [self.replay_raw_features_, feature_batch],
+                axis=0,
+            )
+
+        if targets is None:
+            return
+
+        target_batch = np.asarray(targets)
+        if self.replay_targets_ is None:
+            self.replay_targets_ = target_batch.copy()
+        else:
+            self.replay_targets_ = np.concatenate(
+                [np.asarray(self.replay_targets_), target_batch],
+                axis=0,
+            )
+
+    def _update_selection_and_postprocessor(
+        self,
+        raw_features,
+        targets: Optional[Any],
+        *,
+        incremental: bool = False,
+    ) -> None:
+        raw_features = self._normalize_feature_matrix(raw_features)
 
         # Decide how many features to select (if any) and compute indices based on estimator importances.
         k = self._resolve_n_selected_features(raw_features.shape[1])
@@ -214,12 +432,29 @@ class GraphEstimator(BaseEstimator):
             idx = self._compute_feature_selection_indices(k)
             self.selected_feature_indices_ = idx if idx is not None else None
 
-        # Fit manifold on selected subset if manifold present
-        if self.manifold_ is not None:
-            feats_for_manifold = self._apply_feature_selection(np.asarray(raw_features))
-            self.manifold_.fit(feats_for_manifold, targets)
+        if self.postprocessor_ is not None:
+            feats_for_postprocessor = self._apply_feature_selection(raw_features)
+            if incremental and hasattr(self.postprocessor_, "partial_fit"):
+                self.postprocessor_.partial_fit(feats_for_postprocessor, targets)
+            else:
+                self.postprocessor_.fit(feats_for_postprocessor, targets)
+
+    def _mark_fitted(self) -> "GraphEstimator":
         self._is_fitted = True
         return self
+
+    def _normalize_feature_matrix(self, features):
+        if issparse(features):
+            return features.tocsr()
+        matrix = np.asarray(features)
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(1, -1)
+        return matrix
+
+    def _to_csr(self, features):
+        if issparse(features):
+            return features.tocsr()
+        return self._normalize_feature_matrix(features)
 
     def _transform_raw(self, graphs):
         """Transform graphs to raw feature vectors.
@@ -268,6 +503,8 @@ class GraphEstimator(BaseEstimator):
             Indices of selected features, or None if unavailable.
         """
         est = self.estimator_
+        if est is None:
+            est = getattr(self, "estimator", None)
         if est is None:
             return None
         importances = self._extract_feature_importances(est)
@@ -412,7 +649,7 @@ class GraphEstimator(BaseEstimator):
         return [int(active_idx[i]) for i in order]
 
     def transform(self, graphs):
-        """Transform graphs via the transformer and optional manifold.
+        """Transform graphs via the transformer and optional postprocessor.
 
         Args:
             graphs: Input graphs.
@@ -421,10 +658,11 @@ class GraphEstimator(BaseEstimator):
             Transformed feature matrix.
         """
         raw_features = self._transform_raw(graphs)
-        # Apply feature selection before manifold projection
-        selected = self._apply_feature_selection(np.asarray(raw_features))
-        if self.manifold_ is not None:
-            return self.manifold_.transform(selected)
+        estimator_features = self._transform_preprocessor(raw_features)
+        # Apply feature selection before postprocessor projection.
+        selected = self._apply_feature_selection(estimator_features)
+        if self.postprocessor_ is not None:
+            return self.postprocessor_.transform(selected)
         return selected
 
     def predict(self, graphs):
@@ -438,8 +676,8 @@ class GraphEstimator(BaseEstimator):
         """
         if self.estimator_ is None:
             raise AttributeError("Estimator is None; provide an estimator to use predict.")
-        raw_features = self._transform_raw(graphs)
-        return self.estimator_.predict(raw_features)
+        estimator_features = self._transform_preprocessor(self._transform_raw(graphs))
+        return self.estimator_.predict(estimator_features)
 
     def predict_proba(self, graphs, log: bool = False):
         """Predict class probabilities using the downstream estimator.
@@ -453,13 +691,63 @@ class GraphEstimator(BaseEstimator):
         """
         if self.estimator_ is None:
             raise AttributeError("Estimator is None; provide an estimator to use predict_proba.")
-        if not hasattr(self.estimator_, "predict_proba"):
-            raise AttributeError("Underlying estimator does not implement predict_proba.")
-        raw_features = self._transform_raw(graphs)
-        probs = self.estimator_.predict_proba(raw_features)
+        estimator_features = self._transform_preprocessor(self._transform_raw(graphs))
+        if hasattr(self.estimator_, "predict_proba"):
+            probs = self.estimator_.predict_proba(estimator_features)
+        elif hasattr(self.estimator_, "decision_function"):
+            probs = self._decision_function_to_proba(
+                self.estimator_.decision_function(estimator_features)
+            )
+        else:
+            raise AttributeError(
+                "Underlying estimator does not implement predict_proba or decision_function."
+            )
         if log:
             return np.log(probs)
         return probs
+
+    def _decision_function_to_proba(self, scores):
+        """Convert classifier decision scores to probability-like outputs."""
+        scores = np.asarray(scores, dtype=float)
+        classes = getattr(self.estimator_, "classes_", None)
+        n_classes = len(classes) if classes is not None else None
+
+        if scores.ndim == 1 or (scores.ndim == 2 and scores.shape[1] == 1):
+            if n_classes is not None and n_classes != 2:
+                raise AttributeError(
+                    "Underlying estimator decision_function is binary but classes_ "
+                    f"contains {n_classes} classes."
+                )
+            positive_scores = scores.reshape(-1)
+            p_positive = self._sigmoid(positive_scores)
+            return np.vstack([1.0 - p_positive, p_positive]).T
+
+        if scores.ndim != 2:
+            raise AttributeError(
+                "Underlying estimator decision_function must return a 1D or 2D array."
+            )
+        if n_classes is not None and scores.shape[1] != n_classes:
+            raise AttributeError(
+                "Underlying estimator decision_function output does not match classes_."
+            )
+        return self._softmax(scores)
+
+    @staticmethod
+    def _sigmoid(values):
+        values = np.asarray(values, dtype=float)
+        out = np.empty_like(values, dtype=float)
+        positive = values >= 0
+        out[positive] = 1.0 / (1.0 + np.exp(-values[positive]))
+        exp_values = np.exp(values[~positive])
+        out[~positive] = exp_values / (1.0 + exp_values)
+        return out
+
+    @staticmethod
+    def _softmax(values):
+        values = np.asarray(values, dtype=float)
+        shifted = values - np.max(values, axis=1, keepdims=True)
+        exp_values = np.exp(shifted)
+        return exp_values / np.sum(exp_values, axis=1, keepdims=True)
 
     def plot(
         self,
@@ -469,7 +757,7 @@ class GraphEstimator(BaseEstimator):
         viewport_to_quantile: Optional[float] = None,
     ):
         """
-        Scatter plot of transformed features (uses manifold output if present).
+        Scatter plot of transformed features (uses postprocessor output if present).
 
         Args:
             graphs: Input graphs.
@@ -513,3 +801,122 @@ class GraphEstimator(BaseEstimator):
             plt.show()
 
         return ax
+
+
+class GraphLabelRepairEstimator(BaseEstimator, TransformerMixin):
+    """Predict and repair node and edge labels by masking one element at a time.
+
+    The estimator learns two independent classifiers from a supplied
+    :class:`GraphEstimator`: one for node labels and one for edge labels. Each
+    training example is a graph copy where one known label has been replaced by
+    ``query_label`` and the target is the original label.
+    """
+
+    def __init__(self, graph_estimator: GraphEstimator, query_label: Any = "?") -> None:
+        self.graph_estimator = graph_estimator
+        self.query_label = query_label
+
+    def fit(self, graphs, y=None) -> "GraphLabelRepairEstimator":
+        """Fit node-label and edge-label repair classifiers.
+
+        Args:
+            graphs: Iterable of NetworkX-like graphs.
+            y: Ignored; present for scikit-learn transformer compatibility.
+
+        Returns:
+            GraphLabelRepairEstimator: Fitted estimator.
+        """
+        self.query_label_ = self.query_label
+
+        node_graphs = []
+        node_targets = []
+        edge_graphs = []
+        edge_targets = []
+
+        for graph in graphs:
+            for node, data in graph.nodes(data=True):
+                if "label" not in data:
+                    continue
+                masked_graph = graph.copy()
+                masked_graph.nodes[node]["label"] = self.query_label_
+                node_graphs.append(masked_graph)
+                node_targets.append(data["label"])
+
+            for edge_ref, data in self._iter_edge_refs(graph):
+                if "label" not in data:
+                    continue
+                masked_graph = graph.copy()
+                self._set_edge_label(masked_graph, edge_ref, self.query_label_)
+                edge_graphs.append(masked_graph)
+                edge_targets.append(data["label"])
+
+        self.node_graph_estimator_ = None
+        if node_graphs:
+            self.node_graph_estimator_ = deepcopy(self.graph_estimator)
+            self.node_graph_estimator_.fit(node_graphs, node_targets)
+
+        self.edge_graph_estimator_ = None
+        if edge_graphs:
+            self.edge_graph_estimator_ = deepcopy(self.graph_estimator)
+            self.edge_graph_estimator_.fit(edge_graphs, edge_targets)
+
+        self._is_fitted = True
+        return self
+
+    def transform(self, graphs):
+        """Return graph copies with every node and edge label predicted."""
+        check_is_fitted(self, "_is_fitted")
+
+        input_graphs = list(graphs)
+        repaired_graphs = [graph.copy() for graph in input_graphs]
+
+        node_examples = []
+        node_locations = []
+        edge_examples = []
+        edge_locations = []
+
+        for graph_idx, graph in enumerate(input_graphs):
+            for node in graph.nodes():
+                masked_graph = graph.copy()
+                masked_graph.nodes[node]["label"] = self.query_label_
+                node_examples.append(masked_graph)
+                node_locations.append((graph_idx, node))
+
+            for edge_ref, _ in self._iter_edge_refs(graph):
+                masked_graph = graph.copy()
+                self._set_edge_label(masked_graph, edge_ref, self.query_label_)
+                edge_examples.append(masked_graph)
+                edge_locations.append((graph_idx, edge_ref))
+
+        if node_examples:
+            if self.node_graph_estimator_ is None:
+                raise ValueError("No node label repair classifier was fitted.")
+            node_predictions = self.node_graph_estimator_.predict(node_examples)
+            for (graph_idx, node), label in zip(node_locations, node_predictions):
+                repaired_graphs[graph_idx].nodes[node]["label"] = label
+
+        if edge_examples:
+            if self.edge_graph_estimator_ is None:
+                raise ValueError("No edge label repair classifier was fitted.")
+            edge_predictions = self.edge_graph_estimator_.predict(edge_examples)
+            for (graph_idx, edge_ref), label in zip(edge_locations, edge_predictions):
+                self._set_edge_label(repaired_graphs[graph_idx], edge_ref, label)
+
+        return repaired_graphs
+
+    @staticmethod
+    def _iter_edge_refs(graph):
+        if graph.is_multigraph():
+            for u, v, key, data in graph.edges(keys=True, data=True):
+                yield (u, v, key), data
+        else:
+            for u, v, data in graph.edges(data=True):
+                yield (u, v, None), data
+
+    @staticmethod
+    def _set_edge_label(graph, edge_ref, label) -> None:
+        u, v, key = edge_ref
+        if graph.is_multigraph():
+            graph.edges[u, v, key]["label"] = label
+        else:
+            graph.edges[u, v]["label"] = label

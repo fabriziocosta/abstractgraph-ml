@@ -3,19 +3,30 @@ from __future__ import annotations
 import networkx as nx
 import numpy as np
 
-from abstractgraph_ml.feasibility import FeasibilityEstimator, FeasibilityEstimatorFeatureCannotExist
+from abstractgraph_ml.feasibility import (
+    DEFAULT_EDGE_LABEL,
+    DEFAULT_NODE_LABEL,
+    FeasibilityEstimator,
+    FeasibilityEstimatorFeatureCannotExist,
+)
 
 
 class _RecordingEstimator:
     def __init__(self, predictions):
         self.predictions = predictions
         self.calls = []
+        self.fit_calls = []
+        self.fit_graphs = []
+        self.predict_graphs = []
 
     def fit(self, graphs):
+        self.fit_calls.append(len(graphs))
+        self.fit_graphs.append(list(graphs))
         return self
 
     def predict(self, graphs):
         self.calls.append(len(graphs))
+        self.predict_graphs.append(list(graphs))
         return self.predictions[: len(graphs)]
 
 
@@ -133,6 +144,41 @@ def test_feasibility_number_of_violations_sums_violation_matrix():
     assert preds.tolist() == [3, 5, 7]
 
 
+def test_feasibility_fit_fills_missing_node_and_edge_labels():
+    graph = nx.Graph()
+    graph.add_node(0)
+    graph.add_node(1, label="b")
+    graph.add_edge(0, 1)
+    child = _RecordingEstimator([True])
+    estimator = FeasibilityEstimator([child])
+
+    estimator.fit([graph])
+
+    assert child.fit_calls == [1]
+    fit_graph = child.fit_graphs[0][0]
+    assert fit_graph.nodes[0]["label"] == DEFAULT_NODE_LABEL
+    assert fit_graph.nodes[1]["label"] == "b"
+    assert fit_graph.edges[0, 1]["label"] == DEFAULT_EDGE_LABEL
+    assert "label" not in graph.nodes[0]
+    assert "label" not in graph.edges[0, 1]
+
+
+def test_feasibility_predict_fills_missing_node_and_edge_labels():
+    graph = nx.Graph()
+    graph.add_node(0)
+    graph.add_node(1)
+    graph.add_edge(0, 1)
+    child = _RecordingEstimator([True])
+    estimator = FeasibilityEstimator([child])
+
+    preds = estimator.predict([graph])
+
+    assert preds.tolist() == [True]
+    predict_graph = child.predict_graphs[0][0]
+    assert predict_graph.nodes[0]["label"] == DEFAULT_NODE_LABEL
+    assert predict_graph.edges[0, 1]["label"] == DEFAULT_EDGE_LABEL
+
+
 def test_feature_cannot_exist_violating_edge_sets_returns_one_list_per_graph():
     train_graphs = [_make_labeled_path_graph(2)]
     test_graphs = [_make_labeled_path_graph(2), _make_labeled_path_graph(3)]
@@ -239,6 +285,29 @@ def test_feature_cannot_exist_violating_node_labels_sets_preserves_node_ids():
     violating = estimator.violating_node_labels_sets([test_graph])
 
     assert violating == [[frozenset({1, 2, 5})]]
+
+
+def test_feature_cannot_exist_violating_edge_sets_preserves_directed_edges() -> None:
+    train_graph = nx.DiGraph()
+    train_graph.add_node(0, label="a")
+    train_graph.add_node(1, label="a")
+    train_graph.add_edge(0, 1, label="x")
+
+    test_graph = nx.DiGraph()
+    test_graph.add_node(0, label="a")
+    test_graph.add_node(1, label="a")
+    test_graph.add_node(2, label="a")
+    test_graph.add_edge(0, 1, label="x")
+    test_graph.add_edge(1, 2, label="x")
+
+    estimator = FeasibilityEstimatorFeatureCannotExist(
+        decomposition_function=_singleton_and_edge_decomposition,
+        parallel=False,
+    ).fit([train_graph])
+
+    violating = estimator.violating_edge_sets([test_graph])
+
+    assert violating == [[frozenset({(0, 1), (1, 2)})]]
 
 
 def test_feasibility_violating_edge_sets_concatenates_and_skips_missing_methods():

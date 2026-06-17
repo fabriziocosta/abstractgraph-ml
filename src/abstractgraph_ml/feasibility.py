@@ -10,6 +10,8 @@ from abstractgraph.vectorize import AbstractGraphTransformer
 
 Node = int
 Edge = Tuple[Node, Node]
+DEFAULT_NODE_LABEL = "__abstractgraph_missing_node_label__"
+DEFAULT_EDGE_LABEL = "__abstractgraph_missing_edge_label__"
 
 def label_attribute_is_present(graph):
     """Check whether all nodes and edges carry a ``label`` attribute.
@@ -38,6 +40,24 @@ def filter_graphs_without_node_and_edge_label_attribute(graphs):
         list: Graphs for which :func:`label_attribute_is_present` is ``True``.
     """
     return [graph for graph in graphs if label_attribute_is_present(graph)]
+
+def graph_with_default_label_attributes(graph):
+    """Return a graph copy where every node and edge has a ``label`` attribute."""
+    graph_copy = graph.copy()
+    for _, data in graph_copy.nodes(data=True):
+        data.setdefault("label", DEFAULT_NODE_LABEL)
+    if graph_copy.is_multigraph():
+        edge_iter = graph_copy.edges(data=True, keys=True)
+    else:
+        edge_iter = graph_copy.edges(data=True)
+    for edge in edge_iter:
+        data = edge[-1]
+        data.setdefault("label", DEFAULT_EDGE_LABEL)
+    return graph_copy
+
+def graphs_with_default_label_attributes(graphs):
+    """Return graph copies with default labels filled where labels are missing."""
+    return [graph_with_default_label_attributes(graph) for graph in graphs]
 
 class FeasibilityEstimatorFromBooleanFunction(object):
     """Wrap a graph-level boolean function as a feasibility estimator.
@@ -490,9 +510,11 @@ class FeasibilityEstimatorFeatureCannotExist(object):
         return bool(self.cannot_exist_features_vec[label_int])
 
     def _mapped_subgraph_edge_set(self, mapped_subgraph) -> FrozenSet[Edge]:
-        """Return a stable undirected edge-set view for a mapped base subgraph."""
+        """Return a stable edge-set view for a mapped base subgraph."""
         if mapped_subgraph is None:
             return frozenset()
+        if mapped_subgraph.is_directed():
+            return frozenset((u, v) for u, v in mapped_subgraph.edges())
         return frozenset((min(u, v), max(u, v)) for u, v in mapped_subgraph.edges())
 
     def _mapped_subgraph_node_set(self, mapped_subgraph) -> FrozenSet[Node]:
@@ -611,7 +633,7 @@ class FeasibilityEstimator(object):
         return '%s(%s)'%(self.__class__.__name__, infos)
 
     def fit(self, graphs):
-        """Fit all sub-estimators on the valid labeled subset.
+        """Fit all sub-estimators on graph copies with default labels filled.
 
         Args:
             graphs: Training graphs.
@@ -619,7 +641,7 @@ class FeasibilityEstimator(object):
         Returns:
             FeasibilityEstimator: The fitted estimator.
         """
-        graphs = filter_graphs_without_node_and_edge_label_attribute(graphs)
+        graphs = graphs_with_default_label_attributes(graphs)
         self.feasibility_estimators = [feasibility_estimator.fit(graphs) for feasibility_estimator in self.feasibility_estimators]
         return self
 
@@ -651,6 +673,7 @@ class FeasibilityEstimator(object):
             np.ndarray: Boolean feasibility mask with length ``len(graphs)``.
             Entries outside ``indices`` remain ``False``.
         """
+        graphs = graphs_with_default_label_attributes(graphs)
         if indices is None:
             indices = np.arange(len(graphs))
         else:
@@ -696,6 +719,7 @@ class FeasibilityEstimator(object):
             column contains the violation magnitudes reported by one
             sub-estimator.
         """
+        graphs = graphs_with_default_label_attributes(graphs)
         n_graphs = len(graphs)
         n_estimators = len(self.feasibility_estimators)
         if n_estimators == 0:
@@ -720,7 +744,7 @@ class FeasibilityEstimator(object):
 
     def violating_edge_sets(self, graphs: Iterable) -> List[List[FrozenSet[Edge]]]:
         """Concatenate violating edge sets from child estimators that expose them."""
-        graphs = list(graphs)
+        graphs = graphs_with_default_label_attributes(graphs)
         violating_sets: List[List[FrozenSet[Edge]]] = [[] for _ in range(len(graphs))]
         for feasibility_estimator in self.feasibility_estimators:
             if not hasattr(feasibility_estimator, "violating_edge_sets"):
@@ -732,7 +756,7 @@ class FeasibilityEstimator(object):
 
     def violating_node_labels_sets(self, graphs: Iterable) -> List[List[FrozenSet[Node]]]:
         """Concatenate violating node-id sets from child estimators that expose them."""
-        graphs = list(graphs)
+        graphs = graphs_with_default_label_attributes(graphs)
         violating_sets: List[List[FrozenSet[Node]]] = [[] for _ in range(len(graphs))]
         for feasibility_estimator in self.feasibility_estimators:
             if not hasattr(feasibility_estimator, "violating_node_labels_sets"):
@@ -753,7 +777,7 @@ class FeasibilityEstimator(object):
             list | tuple[list, list]: Feasible graphs alone, or feasible graphs
             with aligned targets when ``targets`` is provided.
         """
-        graphs = filter_graphs_without_node_and_edge_label_attribute(graphs)
+        graphs = list(graphs)
         is_feasible = self.predict(graphs)
         selected_graphs = [graphs[idx] for idx in range(len(graphs)) if is_feasible[idx]==True]
         if targets is not None: 

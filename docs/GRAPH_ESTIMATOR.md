@@ -7,17 +7,18 @@ scikit-style estimator interface on top of it.
 
 ## Main Idea
 
-`GraphEstimator` separates graph learning into three stages:
+`GraphEstimator` separates graph learning into four stages:
 
 1. transform graphs into structural feature vectors
-2. optionally reduce or re-embed those features through a manifold step
-3. fit a downstream estimator on the raw structural features
+2. optionally preprocess those features before prediction
+3. fit a downstream estimator on the preprocessed structural features
+4. optionally reduce or re-embed estimator features through a postprocessor
 
 This gives you a practical bridge from operator programs and vectorization to
 standard ML models.
 
 The implementation lives in
-[estimators.py](/home/fabrizio/sync/Projects/AbstractGraphEcosystem/abstractgraph-ml/src/abstractgraph_ml/estimators.py).
+[estimators.py](../src/abstractgraph_ml/estimators.py).
 
 ## Pipeline Stages
 
@@ -33,6 +34,26 @@ Its job is to:
 
 This is the structural entry point of the pipeline.
 
+### Preprocessor
+
+The `preprocessor` is an optional scikit-compatible transformer applied after
+graph vectorization and before the downstream estimator.
+
+Use it when the predictive model should operate on a transformed feature space,
+for example:
+
+- `PCA`
+- `TruncatedSVD`
+- `StandardScaler`
+- supervised transforms such as `RhoPCA`
+
+The preprocessor is fit on the graph transformer's feature matrix. If
+`targets` are passed to `GraphEstimator.fit(...)`, they are also passed to the
+preprocessor, so supervised transformers can learn from labels.
+
+`predict(...)` and `predict_proba(...)` use the same fitted preprocessor before
+calling the downstream estimator.
+
 ### Estimator
 
 The `estimator` is any scikit-compatible downstream estimator.
@@ -44,15 +65,16 @@ Typical choices are:
 - SVM-style estimators
 - anomaly or outlier estimators
 
-The estimator is always trained on the raw transformer output.
+The estimator is trained on the preprocessor output when `preprocessor` is
+provided. Otherwise, it is trained directly on the raw transformer output.
 
-That detail matters: even when feature selection or manifold learning is used,
-the predictive estimator still learns directly from the original structural
-feature matrix.
+That detail matters: `preprocessor` is part of the predictive path, while
+`postprocessor` is not.
 
-### Manifold
+### Postprocessor
 
-The `manifold` is an optional transformer applied after feature extraction.
+The `postprocessor` is an optional transformer applied after feature extraction
+and preprocessing.
 
 It is intended for:
 
@@ -60,9 +82,13 @@ It is intended for:
 - visualization
 - alternate embeddings of the structural feature space
 
-The default is `PCA()`.
+The default is a sparse-friendly truncated SVD helper,
+`DropFirstTruncatedSVD()`.
 
 This step is used by `transform(...)`, not as the main predictive surface.
+
+`manifold` is still accepted as a backward-compatible alias for
+`postprocessor`, but new code should use `postprocessor`.
 
 ## Feature Selection
 
@@ -83,7 +109,9 @@ Selection behavior:
 - float in `(0, 1)`: fraction of input features
 - float `>= 1`: interpreted as a feature count
 
-Feature selection is mainly used before the manifold stage.
+Feature selection is computed from the downstream estimator and is mainly used
+before the postprocessor stage. When a preprocessor is present, selected feature
+indices refer to the preprocessed feature space.
 
 ## Supervised And Unsupervised Modes
 
@@ -122,7 +150,7 @@ transformer = AbstractGraphTransformer(
 estimator = GraphEstimator(
     transformer=transformer,
     estimator=RandomForestClassifier(random_state=0),
-    manifold=PCA(n_components=2),
+    postprocessor=PCA(n_components=2),
     n_selected_features=0.2,
 )
 
@@ -132,14 +160,57 @@ probs = estimator.predict_proba(test_graphs)
 embedding = estimator.transform(test_graphs)
 ```
 
+### Predict On Reduced Dimensions
+
+Use `preprocessor` when the downstream estimator should train and predict on a
+reduced representation.
+
+```python
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+
+from abstractgraph_ml.estimators import GraphEstimator
+
+estimator = GraphEstimator(
+    transformer=transformer,
+    estimator=LogisticRegression(max_iter=1000),
+    preprocessor=PCA(n_components=32, random_state=0),
+    postprocessor=PCA(n_components=2, random_state=0),
+)
+
+estimator.fit(train_graphs, train_targets)
+preds = estimator.predict(test_graphs)
+```
+
+For supervised preprocessing, pass a transformer whose `fit` or `fit_transform`
+accepts `y`:
+
+```python
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+
+from abstractgraph_ml.estimators import GraphEstimator
+from abstractgraph_ml.rho_pca import RhoPCA
+
+estimator = GraphEstimator(
+    transformer=transformer,
+    estimator=LogisticRegression(max_iter=1000),
+    preprocessor=RhoPCA(n_components=16, target_label=1, background_label=0),
+    postprocessor=PCA(n_components=2, random_state=0),
+)
+
+estimator.fit(train_graphs, train_targets)
+```
+
 ## When To Use It
 
 Use `GraphEstimator` when you want:
 
 - a standard estimator API over structural graph features
 - a simple path from decomposition functions to classical ML
+- a predictive preprocessing stage before a linear or nonlinear estimator
 - optional feature selection driven by model importances
-- a manifold view of the learned feature space
+- a postprocessed view of the learned feature space
 
 It is the default estimator-facing abstraction in `abstractgraph-ml`.
 
