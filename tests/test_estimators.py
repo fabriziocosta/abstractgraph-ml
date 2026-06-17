@@ -182,13 +182,69 @@ class _LookupClassifier:
         return np.asarray([self.mapping_[tuple(row)] for row in X], dtype=object)
 
 
-def _make_graph_label_repair_estimator():
+def _make_graph_label_repair_estimator(n_iteration=1):
     graph_estimator = GraphEstimator(
         transformer=_MaskedElementTransformer(),
         estimator=_LookupClassifier(),
         manifold=None,
     )
-    return GraphLabelRepairEstimator(graph_estimator=graph_estimator)
+    return GraphLabelRepairEstimator(
+        graph_estimator=graph_estimator,
+        n_iteration=n_iteration,
+    )
+
+
+class _IterativeContextTransformer:
+    label_codes = {
+        "A": 1.0,
+        "B": 2.0,
+        "C": 3.0,
+        "wrong0": 4.0,
+        "wrong1": 5.0,
+        "?": 9.0,
+    }
+
+    def fit_transform(self, graphs, targets=None):
+        return self.transform(graphs)
+
+    def transform(self, graphs):
+        rows = []
+        for graph in graphs:
+            query_nodes = [
+                node
+                for node, data in graph.nodes(data=True)
+                if data.get("label") == "?"
+            ]
+            query_node = int(query_nodes[0])
+            context_node = 1 if query_node == 0 else 0
+            context_label = graph.nodes[context_node].get("label")
+            rows.append(
+                [
+                    float(query_node),
+                    self.label_codes.get(context_label, 0.0),
+                ]
+            )
+        return np.asarray(rows, dtype=float)
+
+
+class _IterativeContextClassifier:
+    def fit(self, X, y):
+        self.classes_ = np.asarray(["A", "B", "C"], dtype=object)
+        return self
+
+    def predict(self, X):
+        predictions = []
+        for query_node, context_code in np.asarray(X, dtype=float):
+            key = (int(query_node), int(context_code))
+            predictions.append(
+                {
+                    (0, 1): "B",
+                    (0, 2): "C",
+                    (1, 2): "B",
+                    (1, 4): "B",
+                }.get(key, "B")
+            )
+        return np.asarray(predictions, dtype=object)
 
 
 def test_graph_estimator_partial_fit_reuses_transformer_state() -> None:
@@ -408,6 +464,49 @@ def test_graph_label_repair_estimator_repairs_all_labels_without_mutating_input(
     assert test_graph.nodes[0]["label"] == "wrong-a"
     assert test_graph.nodes[1]["label"] == "wrong-b"
     assert test_graph.edges[0, 1]["label"] == "wrong-x"
+
+
+def test_graph_label_repair_estimator_iterates_repaired_outputs() -> None:
+    graph_estimator = GraphEstimator(
+        transformer=_IterativeContextTransformer(),
+        estimator=_IterativeContextClassifier(),
+        manifold=None,
+    )
+    train_graph = nx.Graph()
+    train_graph.add_node(0, label="A")
+    train_graph.add_node(1, label="B")
+
+    test_graph = nx.Graph()
+    test_graph.add_node(0, label="wrong0")
+    test_graph.add_node(1, label="A")
+
+    one_pass = GraphLabelRepairEstimator(
+        graph_estimator=graph_estimator,
+        n_iteration=1,
+    ).fit([train_graph])
+    two_pass = GraphLabelRepairEstimator(
+        graph_estimator=graph_estimator,
+        n_iteration=2,
+    ).fit([train_graph])
+
+    one_pass_repaired = one_pass.transform([test_graph])[0]
+    two_pass_repaired = two_pass.transform([test_graph])[0]
+
+    assert one_pass_repaired.nodes[0]["label"] == "B"
+    assert one_pass_repaired.nodes[1]["label"] == "B"
+    assert two_pass_repaired.nodes[0]["label"] == "C"
+    assert two_pass_repaired.nodes[1]["label"] == "B"
+    assert test_graph.nodes[0]["label"] == "wrong0"
+    assert test_graph.nodes[1]["label"] == "A"
+
+
+def test_graph_label_repair_estimator_requires_positive_n_iteration() -> None:
+    train_graph = nx.Graph()
+    train_graph.add_node(0, label="A")
+    repair_estimator = _make_graph_label_repair_estimator(n_iteration=0)
+
+    with pytest.raises(ValueError, match="n_iteration must be at least 1"):
+        repair_estimator.fit([train_graph])
 
 
 def test_graph_label_repair_estimator_skips_missing_training_labels() -> None:

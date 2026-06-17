@@ -809,12 +809,20 @@ class GraphLabelRepairEstimator(BaseEstimator, TransformerMixin):
     The estimator learns two independent classifiers from a supplied
     :class:`GraphEstimator`: one for node labels and one for edge labels. Each
     training example is a graph copy where one known label has been replaced by
-    ``query_label`` and the target is the original label.
+    ``query_label`` and the target is the original label. At transform time,
+    repair can be repeated with ``n_iteration`` passes, where each pass repairs
+    the output graphs from the previous pass.
     """
 
-    def __init__(self, graph_estimator: GraphEstimator, query_label: Any = "?") -> None:
+    def __init__(
+        self,
+        graph_estimator: GraphEstimator,
+        query_label: Any = "?",
+        n_iteration: int = 1,
+    ) -> None:
         self.graph_estimator = graph_estimator
         self.query_label = query_label
+        self.n_iteration = n_iteration
 
     def fit(self, graphs, y=None) -> "GraphLabelRepairEstimator":
         """Fit node-label and edge-label repair classifiers.
@@ -827,6 +835,9 @@ class GraphLabelRepairEstimator(BaseEstimator, TransformerMixin):
             GraphLabelRepairEstimator: Fitted estimator.
         """
         self.query_label_ = self.query_label
+        self.n_iteration_ = int(self.n_iteration)
+        if self.n_iteration_ < 1:
+            raise ValueError("n_iteration must be at least 1.")
 
         node_graphs = []
         node_targets = []
@@ -866,7 +877,13 @@ class GraphLabelRepairEstimator(BaseEstimator, TransformerMixin):
     def transform(self, graphs):
         """Return graph copies with every node and edge label predicted."""
         check_is_fitted(self, "_is_fitted")
+        repaired_graphs = list(graphs)
+        for _ in range(self.n_iteration_):
+            repaired_graphs = self._transform_once(repaired_graphs)
+        return repaired_graphs
 
+    def _transform_once(self, graphs):
+        """Run one full node-and-edge repair pass over graph copies."""
         input_graphs = list(graphs)
         repaired_graphs = [graph.copy() for graph in input_graphs]
 
@@ -888,16 +905,17 @@ class GraphLabelRepairEstimator(BaseEstimator, TransformerMixin):
                 edge_examples.append(masked_graph)
                 edge_locations.append((graph_idx, edge_ref))
 
+        if node_examples and self.node_graph_estimator_ is None:
+            raise ValueError("No node label repair classifier was fitted.")
+        if edge_examples and self.edge_graph_estimator_ is None:
+            raise ValueError("No edge label repair classifier was fitted.")
+
         if node_examples:
-            if self.node_graph_estimator_ is None:
-                raise ValueError("No node label repair classifier was fitted.")
             node_predictions = self.node_graph_estimator_.predict(node_examples)
             for (graph_idx, node), label in zip(node_locations, node_predictions):
                 repaired_graphs[graph_idx].nodes[node]["label"] = label
 
         if edge_examples:
-            if self.edge_graph_estimator_ is None:
-                raise ValueError("No edge label repair classifier was fitted.")
             edge_predictions = self.edge_graph_estimator_.predict(edge_examples)
             for (graph_idx, edge_ref), label in zip(edge_locations, edge_predictions):
                 self._set_edge_label(repaired_graphs[graph_idx], edge_ref, label)
