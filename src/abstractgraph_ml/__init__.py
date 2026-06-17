@@ -6,7 +6,11 @@ other heavier visualization/top-k dependencies to import successfully.
 
 from __future__ import annotations
 
-from abstractgraph_ml.estimators import GraphEstimator, IsolationForestProba
+from abstractgraph_ml.estimators import (
+    GraphEstimator,
+    GraphLabelRepairEstimator,
+    IsolationForestProba,
+)
 from abstractgraph_ml.feasibility import *  # noqa: F401,F403
 
 _importance_import_error = None
@@ -31,6 +35,7 @@ _TOPK_EXPORTS = {
 
 __all__ = [
     "GraphEstimator",
+    "GraphLabelRepairEstimator",
     "IsolationForestProba",
     "NeuralGraphEstimator",
     "InputAdapterLinear",
