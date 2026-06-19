@@ -182,7 +182,11 @@ class _LookupClassifier:
         return np.asarray([self.mapping_[tuple(row)] for row in X], dtype=object)
 
 
-def _make_graph_label_repair_estimator(n_iteration=1):
+def _make_graph_label_repair_estimator(
+    n_iteration=1,
+    repair_node_labels=True,
+    repair_edge_labels=True,
+):
     graph_estimator = GraphEstimator(
         transformer=_MaskedElementTransformer(),
         estimator=_LookupClassifier(),
@@ -191,6 +195,8 @@ def _make_graph_label_repair_estimator(n_iteration=1):
     return GraphLabelRepairEstimator(
         graph_estimator=graph_estimator,
         n_iteration=n_iteration,
+        repair_node_labels=repair_node_labels,
+        repair_edge_labels=repair_edge_labels,
     )
 
 
@@ -523,6 +529,58 @@ def test_graph_label_repair_estimator_skips_missing_training_labels() -> None:
         repair_estimator.node_graph_estimator_.estimator_.fit_y_,
         np.asarray(["A"], dtype=object),
     )
+
+
+def test_graph_label_repair_estimator_can_repair_only_node_labels() -> None:
+    train_graph = nx.Graph()
+    train_graph.add_node(0, label="A")
+    train_graph.add_node(1, label="B")
+    train_graph.add_edge(0, 1, label="x")
+
+    repair_estimator = _make_graph_label_repair_estimator(
+        repair_node_labels=True,
+        repair_edge_labels=False,
+    )
+    repair_estimator.fit([train_graph])
+
+    test_graph = nx.Graph()
+    test_graph.add_node(0, label="wrong-a")
+    test_graph.add_node(1, label="wrong-b")
+    test_graph.add_edge(0, 1, label="wrong-x")
+
+    repaired = repair_estimator.transform([test_graph])[0]
+
+    assert repair_estimator.node_graph_estimator_ is not None
+    assert repair_estimator.edge_graph_estimator_ is None
+    assert repaired.nodes[0]["label"] == "A"
+    assert repaired.nodes[1]["label"] == "B"
+    assert repaired.edges[0, 1]["label"] == "wrong-x"
+
+
+def test_graph_label_repair_estimator_can_repair_only_edge_labels() -> None:
+    train_graph = nx.Graph()
+    train_graph.add_node(0, label="A")
+    train_graph.add_node(1, label="B")
+    train_graph.add_edge(0, 1, label="x")
+
+    repair_estimator = _make_graph_label_repair_estimator(
+        repair_node_labels=False,
+        repair_edge_labels=True,
+    )
+    repair_estimator.fit([train_graph])
+
+    test_graph = nx.Graph()
+    test_graph.add_node(0, label="wrong-a")
+    test_graph.add_node(1, label="wrong-b")
+    test_graph.add_edge(0, 1, label="wrong-x")
+
+    repaired = repair_estimator.transform([test_graph])[0]
+
+    assert repair_estimator.node_graph_estimator_ is None
+    assert repair_estimator.edge_graph_estimator_ is not None
+    assert repaired.nodes[0]["label"] == "wrong-a"
+    assert repaired.nodes[1]["label"] == "wrong-b"
+    assert repaired.edges[0, 1]["label"] == "x"
 
 
 def test_graph_label_repair_estimator_transform_before_fit_raises() -> None:
