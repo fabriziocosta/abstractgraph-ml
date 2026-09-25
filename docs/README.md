@@ -37,17 +37,10 @@ This repo owns:
 
 ## Ecosystem
 
-Sibling repositories:
-
-- `abstractgraph`
-  Path: `/home/fabrizio/work/abstractgraph`
-- `abstractgraph-ml`
-  Path: `/home/fabrizio/work/abstractgraph-ml`
-- `abstractgraph-generative`
-  Path: `/home/fabrizio/work/abstractgraph-generative`
-
-See [../ECOSYSTEM.md](../ECOSYSTEM.md) for install order and dependency
-direction.
+This repository is part of the four-package
+[AbstractGraph ecosystem checkout](../../../README.md). The superproject's
+[organization guide](../../../docs/ORGANIZATION.md) documents submodules,
+dependency direction, installation, and synchronization.
 
 ## Typical workflow
 
