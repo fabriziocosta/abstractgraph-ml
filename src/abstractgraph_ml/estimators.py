@@ -183,6 +183,9 @@ class GraphEstimator(BaseEstimator):
         Fitted copy of the provided transformer.
     estimator_ : Optional[BaseEstimator]
         Fitted copy of the downstream estimator (if provided).
+    classes_ : np.ndarray
+        Class labels from the fitted downstream estimator, ordered as the
+        columns returned by ``predict_proba`` when the estimator exposes them.
     preprocessor_ : Optional[Any]
         Fitted copy of the preprocessor/transformer (if provided).
     postprocessor_ : Optional[Any]
@@ -440,6 +443,11 @@ class GraphEstimator(BaseEstimator):
                 self.postprocessor_.fit(feats_for_postprocessor, targets)
 
     def _mark_fitted(self) -> "GraphEstimator":
+        classes = getattr(self.estimator_, "classes_", None)
+        if classes is None:
+            self.__dict__.pop("classes_", None)
+        else:
+            self.classes_ = np.asarray(classes).copy()
         self._is_fitted = True
         return self
 

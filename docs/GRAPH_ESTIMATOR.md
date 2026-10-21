@@ -160,6 +160,11 @@ probs = estimator.predict_proba(test_graphs)
 embedding = estimator.transform(test_graphs)
 ```
 
+After fitting a classifier, `GraphEstimator.classes_` mirrors the downstream
+estimator's class labels in the same column order as `predict_proba(...)`. This
+supports scikit-learn utilities that inspect fitted class labels, including
+cross-validation prediction helpers.
+
 ### Predict On Reduced Dimensions
 
 Use `preprocessor` when the downstream estimator should train and predict on a
