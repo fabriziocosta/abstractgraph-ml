@@ -158,12 +158,25 @@ class _SummaryQueryLayer(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, summary: Tensor, elements: Tensor) -> Tensor:
+    def forward(
+        self,
+        summary: Tensor,
+        elements: Tensor,
+        key_padding_mask: Tensor,
+        has_elements: Tensor,
+    ) -> Tensor:
         # The query can also retain its own state. Element tokens are never queries
         # and are deliberately not updated or given positional encodings.
         query = self.query_norm(summary)
         memory = self.memory_norm(elements)
-        update, _ = self.attention(query, memory, memory, need_weights=False)
+        update, _ = self.attention(
+            query,
+            memory,
+            memory,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
+        update = update * has_elements[:, None, None]
         summary = summary + update
         return summary + self.ff(self.ff_norm(summary))
 
@@ -234,57 +247,112 @@ class _HierarchicalGraphModel(nn.Module):
             values = values + self.node_attribute_projection(attributes)
         return self.node_projection(values)
 
-    def _encode_interpretation(self, item: Dict[str, Any]) -> Tensor:
+    def _encode_interpretations(self, items: Sequence[Dict[str, Any]]) -> Tensor:
+        """Encode a batch of ragged mapped subgraphs in parallel."""
         device = self.graph_token.device
-        summary = self.interpretation_embedding(torch.tensor([item["label"]], device=device)).unsqueeze(0)
-        element_labels = torch.as_tensor(item["element_labels"], dtype=torch.long, device=device)
-        count = int(element_labels.numel())
-        if self.element_mode == "node":
-            attributes = _attribute_tensor(
-                item["element_attributes"], self.node_attribute_dim, context="Node"
-            ).to(device)
-            elements = self._node_features(element_labels, attributes).unsqueeze(0)
-        else:
-            edge_attributes = _attribute_tensor(
-                item["element_attributes"], self.edge_attribute_dim, context="Edge"
-            ).to(device)
-            endpoint_labels = torch.as_tensor(item["endpoint_labels"], dtype=torch.long, device=device)
-            endpoint_attributes = item["endpoint_attributes"]
-            endpoint_node_features: List[Tensor] = []
-            for endpoint in range(2):
-                attrs = [pair[endpoint] for pair in endpoint_attributes]
-                attrs_tensor = _attribute_tensor(attrs, self.node_attribute_dim, context="Node").to(device)
-                endpoint_node_features.append(self._node_features(endpoint_labels[:, endpoint], attrs_tensor))
-            if count:
-                # Averaging makes undirected edge tokens independent of endpoint order.
-                endpoints = (endpoint_node_features[0] + endpoint_node_features[1]) / 2.0
-                edge_labels = self.element_label_embedding(element_labels)
-                if self.edge_attribute_projection is not None:
-                    edge_labels = edge_labels + self.edge_attribute_projection(edge_attributes)
-                edge_vector = self.edge_projection(torch.cat((edge_labels, endpoints), dim=-1))
-                elements = edge_vector.unsqueeze(0)
-            else:
-                elements = self.graph_token.new_empty((1, 0, self.local_d_model))
+        if not items:
+            return self.graph_token.new_empty((0, self.local_d_model))
 
+        counts = [len(item["element_labels"]) for item in items]
+        max_elements = max(1, max(counts))
+        item_count = len(items)
+        item_labels = torch.as_tensor([item["label"] for item in items], dtype=torch.long, device=device)
+        element_labels_array = np.zeros((item_count, max_elements), dtype=np.int64)
+        element_padding_array = np.ones((item_count, max_elements), dtype=np.bool_)
+
+        if self.element_mode == "node":
+            element_attributes_array = np.zeros(
+                (item_count, max_elements, self.node_attribute_dim), dtype=np.float32
+            )
+            for row, item in enumerate(items):
+                count = counts[row]
+                if not count:
+                    continue
+                element_labels_array[row, :count] = item["element_labels"]
+                element_padding_array[row, :count] = False
+                for column, values in enumerate(item["element_attributes"]):
+                    if values.size:
+                        element_attributes_array[row, column] = values
+            element_labels = torch.as_tensor(element_labels_array, dtype=torch.long, device=device)
+            element_attributes = torch.as_tensor(element_attributes_array, dtype=torch.float32, device=device)
+            elements = self._node_features(element_labels, element_attributes)
+        else:
+            endpoint_labels_array = np.zeros((item_count, max_elements, 2), dtype=np.int64)
+            edge_attributes_array = np.zeros(
+                (item_count, max_elements, self.edge_attribute_dim), dtype=np.float32
+            )
+            endpoint_attributes_array = np.zeros(
+                (item_count, max_elements, 2, self.node_attribute_dim), dtype=np.float32
+            )
+            for row, item in enumerate(items):
+                count = counts[row]
+                if not count:
+                    continue
+                element_labels_array[row, :count] = item["element_labels"]
+                endpoint_labels_array[row, :count] = item["endpoint_labels"]
+                element_padding_array[row, :count] = False
+                for column, values in enumerate(item["element_attributes"]):
+                    if values.size:
+                        edge_attributes_array[row, column] = values
+                for column, pair in enumerate(item["endpoint_attributes"]):
+                    for endpoint, values in enumerate(pair):
+                        if values.size:
+                            endpoint_attributes_array[row, column, endpoint] = values
+            element_labels = torch.as_tensor(element_labels_array, dtype=torch.long, device=device)
+            edge_attributes = torch.as_tensor(edge_attributes_array, dtype=torch.float32, device=device)
+            endpoint_labels = torch.as_tensor(endpoint_labels_array, dtype=torch.long, device=device)
+            endpoint_attributes = torch.as_tensor(endpoint_attributes_array, dtype=torch.float32, device=device)
+            source = self._node_features(endpoint_labels[:, :, 0], endpoint_attributes[:, :, 0])
+            target = self._node_features(endpoint_labels[:, :, 1], endpoint_attributes[:, :, 1])
+            # Averaging makes undirected edge tokens independent of endpoint order.
+            endpoints = (source + target) / 2.0
+            edge_labels = self.element_label_embedding(element_labels)
+            if self.edge_attribute_projection is not None:
+                edge_labels = edge_labels + self.edge_attribute_projection(edge_attributes)
+            elements = self.edge_projection(torch.cat((edge_labels, endpoints), dim=-1))
+
+        empty_rows = np.asarray(counts) == 0
+        element_padding_array[empty_rows, 0] = False
+        element_padding_mask = torch.as_tensor(element_padding_array, dtype=torch.bool, device=device)
+        has_elements = torch.as_tensor([count > 0 for count in counts], dtype=torch.bool, device=device)
+        # MultiheadAttention cannot attend to an entirely masked row. Empty mapped
+        # subgraphs get one harmless dummy key; its attention update is then zeroed.
+        summary = self.interpretation_embedding(item_labels).unsqueeze(1)
         for layer in self.local_layers:
-            if count:
-                summary = layer(summary, elements)
-            else:
-                # An empty mapped subgraph is represented by its hash token alone.
-                summary = summary + layer.ff(layer.ff_norm(summary))
-        return self.local_norm(summary.squeeze(0).squeeze(0))
+            summary = layer(summary, elements, element_padding_mask, has_elements)
+        return self.local_norm(summary[:, 0, :])
 
     def forward(self, batch: Sequence[Dict[str, Any]]) -> Tuple[Tensor, Tensor]:
-        graph_embeddings: List[Tensor] = []
-        for graph in batch:
-            interpretations = graph["interpretations"]
-            local = [self._encode_interpretation(item) for item in interpretations]
-            tokens = [self.graph_token.squeeze(0).squeeze(0)]
-            tokens.extend(self.to_global(value) for value in local)
-            sequence = torch.stack(tokens, dim=0).unsqueeze(0)
-            encoded = self.global_norm(self.global_transformer(sequence))
-            graph_embeddings.append(encoded[0, 0])
-        graph_embedding = torch.stack(graph_embeddings, dim=0)
+        if not batch:
+            empty = self.graph_token.new_empty((0, self.global_d_model))
+            return empty, self.head(empty)
+
+        graph_indices: List[int] = []
+        graph_positions: List[int] = []
+        interpretations: List[Dict[str, Any]] = []
+        counts: List[int] = []
+        for graph_index, graph in enumerate(batch):
+            graph_items = graph["interpretations"]
+            counts.append(len(graph_items))
+            interpretations.extend(graph_items)
+            graph_indices.extend([graph_index] * len(graph_items))
+            graph_positions.extend(range(1, len(graph_items) + 1))
+
+        local = self._encode_interpretations(interpretations)
+        max_interpretations = max(counts, default=0)
+        sequence = self.graph_token.new_zeros((len(batch), max_interpretations + 1, self.global_d_model))
+        sequence[:, 0, :] = self.graph_token[0, 0, :]
+        padding_mask_array = np.ones((len(batch), max_interpretations + 1), dtype=np.bool_)
+        padding_mask_array[:, 0] = False
+        for index, count in enumerate(counts):
+            padding_mask_array[index, 1 : count + 1] = False
+        if interpretations:
+            graph_index_tensor = torch.as_tensor(graph_indices, dtype=torch.long, device=self.graph_token.device)
+            graph_position_tensor = torch.as_tensor(graph_positions, dtype=torch.long, device=self.graph_token.device)
+            sequence[graph_index_tensor, graph_position_tensor] = self.to_global(local)
+        padding_mask = torch.as_tensor(padding_mask_array, dtype=torch.bool, device=self.graph_token.device)
+        encoded = self.global_norm(self.global_transformer(sequence, src_key_padding_mask=padding_mask))
+        graph_embedding = encoded[:, 0, :]
         return graph_embedding, self.head(graph_embedding)
 
 
@@ -515,8 +583,8 @@ class NeuralGraphEstimator:
         for epoch in range(self.epochs):
             self.model_.train()
             np.random.shuffle(training_indices)
-            losses: List[float] = []
-            train_correct = 0
+            losses: List[Tensor] = []
+            train_correct = torch.zeros((), dtype=torch.long, device=self.device)
             train_count = 0
             batch_starts = list(range(0, len(training_indices), self.batch_size))
             progress_interval = max(1, math.ceil(len(batch_starts) / 5))
@@ -528,35 +596,35 @@ class NeuralGraphEstimator:
                 loss = criterion(prediction, batch_targets)
                 loss.backward()
                 optimizer.step()
-                losses.append(float(loss.detach().cpu()))
+                losses.append(loss.detach())
                 if self.mode == "classification":
-                    train_correct += int((prediction.detach().argmax(dim=1) == batch_targets).sum().item())
+                    train_correct = train_correct + (prediction.detach().argmax(dim=1) == batch_targets).sum()
                     train_count += len(batch_indices)
                 if self.verbose and (batch_number % progress_interval == 0 or batch_number == len(batch_starts)):
                     progress = f"epoch {epoch + 1}/{self.epochs}, batch {batch_number}/{len(batch_starts)}"
                     if self.mode == "classification":
-                        progress += f", train_accuracy={train_correct / train_count:.3f}"
+                        progress += f", train_accuracy={train_correct.item() / train_count:.3f}"
                     print(progress, flush=True)
-            train_loss = float(np.mean(losses)) if losses else math.nan
-            train_accuracy = train_correct / train_count if train_count else None
+            train_loss = float(torch.stack(losses).mean().cpu()) if losses else math.nan
+            train_accuracy = train_correct.item() / train_count if train_count else None
             self.history_["loss"].append(train_loss)
             validation_loss: Optional[float] = None
             validation_accuracy: Optional[float] = None
             if validation_indices:
                 self.model_.eval()
                 with torch.no_grad():
-                    val_losses = []
-                    val_correct = 0
+                    val_losses: List[Tensor] = []
+                    val_correct = torch.zeros((), dtype=torch.long, device=self.device)
                     for start in range(0, len(validation_indices), self.batch_size):
                         batch_indices = validation_indices[start : start + self.batch_size]
                         _, prediction = self.model_([examples[index] for index in batch_indices])
                         batch_targets = y[batch_indices]
-                        val_losses.append(float(criterion(prediction, batch_targets).cpu()))
+                        val_losses.append(criterion(prediction, batch_targets).detach())
                         if self.mode == "classification":
-                            val_correct += int((prediction.argmax(dim=1) == batch_targets).sum().item())
-                    validation_loss = float(np.mean(val_losses))
+                            val_correct = val_correct + (prediction.argmax(dim=1) == batch_targets).sum()
+                    validation_loss = float(torch.stack(val_losses).mean().cpu())
                     if self.mode == "classification":
-                        validation_accuracy = val_correct / len(validation_indices)
+                        validation_accuracy = val_correct.item() / len(validation_indices)
                     self.history_["val_loss"].append(validation_loss)
                 if validation_loss < best_loss:
                     best_loss = validation_loss
