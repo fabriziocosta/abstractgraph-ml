@@ -19,8 +19,6 @@ _neural_import_error = None
 
 _NEURAL_EXPORTS = {
     "NeuralGraphEstimator",
-    "InputAdapterLinear",
-    "InputAdapterFactorized",
 }
 _IMPORTANCE_EXPORTS = {
     "annotate_graph_node_saliency",
@@ -38,8 +36,6 @@ __all__ = [
     "GraphLabelRepairEstimator",
     "IsolationForestProba",
     "NeuralGraphEstimator",
-    "InputAdapterLinear",
-    "InputAdapterFactorized",
     "annotate_graph_node_saliency",
     "plot_graph_node_saliency",
     "plot_graph_node_saliency_with_estimator",
