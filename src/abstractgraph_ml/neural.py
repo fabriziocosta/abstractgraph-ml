@@ -25,6 +25,16 @@ TaskMode = Literal["classification", "regression"]
 ElementMode = Literal["node", "edge"]
 
 
+def _default_device() -> torch.device:
+    """Select an available accelerator, including Apple's Metal backend."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is not None and mps_backend.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def _label_id(value: Any, nbits: int, *, interpretation_hash: bool = False) -> int:
     """Map labels into the embedding table, reserving 0 for padding and 1 for missing."""
     if value is None:
@@ -284,6 +294,7 @@ class NeuralGraphEstimator:
     ``decomposition_function`` receives the ``AbstractGraph`` created for each
     input graph and must return the decomposed ``AbstractGraph``. The selected
     ``element_mode`` controls which mapped-subgraph elements become local tokens.
+    If ``device`` is omitted, CUDA is preferred, then Apple MPS, then CPU.
     """
 
     def __init__(
@@ -336,9 +347,7 @@ class NeuralGraphEstimator:
         self.val_split = float(val_split)
         self.early_stopping_patience = early_stopping_patience
         self.seed = seed
-        self.device = torch.device(device) if device is not None else torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        self.device = torch.device(device) if device is not None else _default_device()
         self.verbose = bool(verbose)
         self.model_: Optional[_HierarchicalGraphModel] = None
         self.classes_: Optional[np.ndarray] = None
