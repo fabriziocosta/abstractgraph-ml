@@ -212,7 +212,9 @@ class _HierarchicalGraphModel(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.global_transformer = nn.TransformerEncoder(layer, num_layers=global_num_layers)
+        self.global_transformer = nn.TransformerEncoder(
+            layer, num_layers=global_num_layers, enable_nested_tensor=False
+        )
         self.global_norm = nn.LayerNorm(global_d_model)
         self.head = nn.Linear(global_d_model, output_dim)
 
