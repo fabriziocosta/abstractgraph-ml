@@ -57,6 +57,35 @@ def _numeric_attribute(value: Any, *, context: str) -> np.ndarray:
     return result
 
 
+def _node_attribute(data: Dict[str, Any]) -> np.ndarray:
+    if data.get("attribute") is not None:
+        return _numeric_attribute(data.get("attribute"), context="Node")
+    if any(name in data for name in ("atomic_num", "formal_charge", "aromatic")):
+        return np.asarray(
+            [
+                float(data.get("atomic_num", 0.0)) / 100.0,
+                float(data.get("formal_charge", 0.0)) / 4.0,
+                float(bool(data.get("aromatic", False))),
+            ],
+            dtype=np.float32,
+        )
+    return np.zeros((0,), dtype=np.float32)
+
+
+def _edge_attribute(data: Dict[str, Any]) -> np.ndarray:
+    if data.get("attribute") is not None:
+        return _numeric_attribute(data.get("attribute"), context="Edge")
+    if any(name in data for name in ("bond_order", "aromatic")):
+        return np.asarray(
+            [
+                float(data.get("bond_order", 1.0)) / 3.0,
+                float(bool(data.get("aromatic", False))),
+            ],
+            dtype=np.float32,
+        )
+    return np.zeros((0,), dtype=np.float32)
+
+
 def _graph_to_input(
     graph: nx.Graph,
     decomposition_function: Callable[[AbstractGraph], AbstractGraph],
@@ -81,18 +110,18 @@ def _graph_to_input(
         if mapped is not None:
             for node, data in mapped.nodes(data=True):
                 node_label = _label_id(data.get("label"), nbits)
-                node_attribute = _numeric_attribute(data.get("attribute"), context="Node")
+                node_attribute = _node_attribute(data)
                 node_attribute_widths.append(node_attribute.size)
 
             if element_mode == "node":
                 for _, data in mapped.nodes(data=True):
                     element_labels.append(_label_id(data.get("label"), nbits))
-                    attribute = _numeric_attribute(data.get("attribute"), context="Node")
+                    attribute = _node_attribute(data)
                     element_attributes.append(attribute)
             else:
                 for source, target, data in mapped.edges(data=True):
                     element_labels.append(_label_id(data.get("label"), nbits))
-                    attribute = _numeric_attribute(data.get("attribute"), context="Edge")
+                    attribute = _edge_attribute(data)
                     edge_attribute_widths.append(attribute.size)
                     element_attributes.append(attribute)
                     source_data = mapped.nodes[source]
@@ -100,8 +129,8 @@ def _graph_to_input(
                     endpoint_labels.append(
                         (_label_id(source_data.get("label"), nbits), _label_id(target_data.get("label"), nbits))
                     )
-                    source_attribute = _numeric_attribute(source_data.get("attribute"), context="Node")
-                    target_attribute = _numeric_attribute(target_data.get("attribute"), context="Node")
+                    source_attribute = _node_attribute(source_data)
+                    target_attribute = _node_attribute(target_data)
                     endpoint_attributes.append((source_attribute, target_attribute))
 
         interpretations.append(
@@ -119,6 +148,35 @@ def _graph_to_input(
         "node_attribute_widths": node_attribute_widths,
         "edge_attribute_widths": edge_attribute_widths,
     }
+
+
+def _graph_to_gin_input(graph: nx.Graph, nbits: int) -> Dict[str, Any]:
+    """Encode a labeled molecular graph for batched message passing."""
+    nodes = list(graph.nodes(data=True))
+    node_ids = {node: index for index, (node, _) in enumerate(nodes)}
+    labels = np.zeros((len(nodes),), dtype=np.int64)
+    attributes = np.zeros((len(nodes), 4), dtype=np.float32)
+    for index, (node, data) in enumerate(nodes):
+        labels[index] = _label_id(data.get("label"), nbits)
+        attributes[index] = (
+            float(data.get("atomic_num", 0.0)) / 100.0,
+            float(data.get("formal_charge", 0.0)) / 4.0,
+            float(bool(data.get("aromatic", False))),
+            float(graph.degree[node]) / 8.0,
+        )
+
+    relation_ids = {"single": 0, "double": 1, "triple": 2, "aromatic": 3}
+    edges: List[Tuple[int, int, int]] = []
+    for source, target, data in graph.edges(data=True):
+        relation = str(data.get("label", "")).lower()
+        if relation not in relation_ids:
+            bond_order = float(data.get("bond_order", 1.0))
+            relation = "aromatic" if bool(data.get("aromatic", False)) or bond_order == 1.5 else (
+                "triple" if bond_order >= 3 else "double" if bond_order >= 2 else "single"
+            )
+        edges.append((node_ids[source], node_ids[target], relation_ids[relation]))
+    edge_array = np.asarray(edges, dtype=np.int64).reshape(-1, 3)
+    return {"node_labels": labels, "node_attributes": attributes, "edges": edge_array}
 
 
 def _infer_width(widths: Sequence[int], name: str) -> int:
@@ -356,12 +414,92 @@ class _HierarchicalGraphModel(nn.Module):
         return graph_embedding, self.head(graph_embedding)
 
 
+class _GraphIsomorphismModel(nn.Module):
+    """A relation-aware GIN for direct message passing over input graphs."""
+
+    def __init__(
+        self,
+        *,
+        nbits: int,
+        hidden_dim: int,
+        num_layers: int,
+        dim_feedforward: int,
+        dropout: float,
+        output_dim: int,
+    ) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.node_embedding = nn.Embedding(1 << nbits, hidden_dim, padding_idx=0)
+        self.node_attribute_projection = nn.Linear(4, hidden_dim, bias=False)
+        self.layers = nn.ModuleList(
+            nn.Sequential(
+                nn.Linear(hidden_dim * 5, dim_feedforward),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim_feedforward, hidden_dim),
+            )
+            for _ in range(num_layers)
+        )
+        self.norms = nn.ModuleList(nn.LayerNorm(hidden_dim) for _ in range(num_layers))
+        self.dropout = nn.Dropout(dropout)
+        self.readout = nn.Linear(hidden_dim * 2 * (num_layers + 1), hidden_dim)
+        self.head = nn.Linear(hidden_dim, output_dim)
+
+    def _collate(self, batch: Sequence[Dict[str, Any]]) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        device = self.node_embedding.weight.device
+        counts = [int(graph["node_labels"].size) for graph in batch]
+        max_nodes = max(1, max(counts, default=0))
+        node_labels = np.zeros((len(batch), max_nodes), dtype=np.int64)
+        node_attributes = np.zeros((len(batch), max_nodes, 4), dtype=np.float32)
+        edge_adjacencies = np.zeros((len(batch), max_nodes, max_nodes, 4), dtype=np.float32)
+        node_mask = np.zeros((len(batch), max_nodes), dtype=np.bool_)
+        for graph_index, graph in enumerate(batch):
+            count = counts[graph_index]
+            if count:
+                node_labels[graph_index, :count] = graph["node_labels"]
+                node_attributes[graph_index, :count] = graph["node_attributes"]
+                node_mask[graph_index, :count] = True
+            for source, target, relation in graph["edges"]:
+                edge_adjacencies[graph_index, source, target, relation] = 1.0
+                edge_adjacencies[graph_index, target, source, relation] = 1.0
+        return (
+            torch.as_tensor(node_labels, dtype=torch.long, device=device),
+            torch.as_tensor(node_attributes, dtype=torch.float32, device=device),
+            torch.as_tensor(edge_adjacencies, dtype=torch.float32, device=device),
+            torch.as_tensor(node_mask, dtype=torch.bool, device=device),
+        )
+
+    def forward(self, batch: Sequence[Dict[str, Any]]) -> Tuple[Tensor, Tensor]:
+        node_labels, node_attributes, edge_adjacencies, node_mask = self._collate(batch)
+        mask = node_mask.unsqueeze(-1)
+        hidden = self.node_embedding(node_labels) + self.node_attribute_projection(node_attributes)
+        hidden = hidden * mask
+        graph_representations = []
+
+        def pool(values: Tensor) -> Tensor:
+            total = values.sum(dim=1)
+            count = node_mask.sum(dim=1, keepdim=True).clamp_min(1).to(values.dtype)
+            return torch.cat((total, total / count), dim=-1)
+
+        graph_representations.append(pool(hidden))
+        for layer, norm in zip(self.layers, self.norms):
+            neighbor_sums = torch.einsum("bijr,bjd->bird", edge_adjacencies, hidden)
+            neighbor_sums = neighbor_sums.flatten(start_dim=2)
+            update = layer(torch.cat((hidden, neighbor_sums), dim=-1))
+            hidden = self.dropout(norm(hidden + update)) * mask
+            graph_representations.append(pool(hidden))
+        embedding = F.gelu(self.readout(torch.cat(graph_representations, dim=-1)))
+        return embedding, self.head(embedding)
+
+
 class NeuralGraphEstimator:
     """Train a hierarchical Transformer over AbstractGraph mapped subgraphs.
 
     ``decomposition_function`` receives the ``AbstractGraph`` created for each
     input graph and must return the decomposed ``AbstractGraph``. The selected
     ``element_mode`` controls which mapped-subgraph elements become local tokens.
+    Set ``architecture="gin"`` to use direct relation-aware message passing on
+    the input graph instead of the hierarchical decomposition encoder.
     If ``device`` is omitted, CUDA is preferred, then Apple MPS, then CPU.
     """
 
@@ -370,6 +508,7 @@ class NeuralGraphEstimator:
         decomposition_function: Callable[[AbstractGraph], AbstractGraph],
         nbits: int = 10,
         element_mode: ElementMode = "node",
+        architecture: Literal["hierarchical", "gin"] = "hierarchical",
         mode: TaskMode = "classification",
         num_classes: Optional[int] = None,
         output_dim: int = 1,
@@ -386,15 +525,18 @@ class NeuralGraphEstimator:
         batch_size: int = 16,
         lr: float = 1e-3,
         weight_decay: float = 0.0,
+        class_weight: Optional[Union[Literal["balanced"], Sequence[float]]] = None,
         val_split: float = 0.0,
         early_stopping_patience: Optional[int] = None,
         seed: Optional[int] = None,
+        validation_seed: Optional[int] = None,
         device: Optional[Union[str, torch.device]] = None,
         verbose: bool = False,
     ) -> None:
         self.decomposition_function = decomposition_function
         self.nbits = int(nbits)
         self.element_mode = element_mode
+        self.architecture = architecture
         self.mode = mode
         self._num_classes_param = None if num_classes is None else int(num_classes)
         self.num_classes = None if num_classes is None else int(num_classes)
@@ -412,9 +554,11 @@ class NeuralGraphEstimator:
         self.batch_size = int(batch_size)
         self.lr = float(lr)
         self.weight_decay = float(weight_decay)
+        self.class_weight = class_weight
         self.val_split = float(val_split)
         self.early_stopping_patience = early_stopping_patience
         self.seed = seed
+        self.validation_seed = validation_seed
         self.device = torch.device(device) if device is not None else _default_device()
         self.verbose = bool(verbose)
         self.model_: Optional[_HierarchicalGraphModel] = None
@@ -427,6 +571,8 @@ class NeuralGraphEstimator:
     def _validate_params(self) -> None:
         if self.element_mode not in ("node", "edge"):
             raise ValueError("element_mode must be 'node' or 'edge'.")
+        if self.architecture not in ("hierarchical", "gin"):
+            raise ValueError("architecture must be 'hierarchical' or 'gin'.")
         if self.mode not in ("classification", "regression"):
             raise ValueError("mode must be 'classification' or 'regression'.")
         if self.nbits < 2:
@@ -450,6 +596,10 @@ class NeuralGraphEstimator:
             raise ValueError("epochs must be positive.")
         if not 0.0 <= self.val_split < 1.0:
             raise ValueError("val_split must be in [0, 1).")
+        if isinstance(self.class_weight, str) and self.class_weight != "balanced":
+            raise ValueError("class_weight must be None, 'balanced', or a sequence of class weights.")
+        if self.class_weight is not None and self.mode != "classification":
+            raise ValueError("class_weight is only available in classification mode.")
 
     def _preprocess(self, graphs: Sequence[nx.Graph], *, fitting: bool = False) -> List[Dict[str, Any]]:
         if self.verbose and fitting:
@@ -457,9 +607,16 @@ class NeuralGraphEstimator:
         prepared: List[Dict[str, Any]] = []
         progress_interval = max(1, math.ceil(len(graphs) / 10))
         for index, graph in enumerate(graphs, start=1):
-            prepared.append(_graph_to_input(graph, self.decomposition_function, self.nbits, self.element_mode))
+            if self.architecture == "gin":
+                prepared.append(_graph_to_gin_input(graph, self.nbits))
+            else:
+                prepared.append(_graph_to_input(graph, self.decomposition_function, self.nbits, self.element_mode))
             if self.verbose and fitting and (index % progress_interval == 0 or index == len(graphs)):
                 print(f"Preprocessed {index}/{len(graphs)} graphs", flush=True)
+        if self.architecture == "gin":
+            self.node_attribute_dim_ = 4
+            self.edge_attribute_dim_ = 0
+            return prepared
         node_widths = [width for graph in prepared for width in graph["node_attribute_widths"]]
         edge_widths = [width for graph in prepared for width in graph["edge_attribute_widths"]]
         node_width = _infer_width(node_widths, "node")
@@ -500,6 +657,16 @@ class NeuralGraphEstimator:
         output_dim = self.num_classes if self.mode == "classification" else self.output_dim
         if output_dim is None or output_dim <= 0:
             raise ValueError("num_classes/output_dim must be positive.")
+        if self.architecture == "gin":
+            self.model_ = _GraphIsomorphismModel(
+                nbits=self.nbits,
+                hidden_dim=self.local_d_model,
+                num_layers=self.local_num_layers,
+                dim_feedforward=self.local_dim_feedforward,
+                dropout=self.dropout,
+                output_dim=int(output_dim),
+            ).to(self.device)
+            return
         model = _HierarchicalGraphModel(
             nbits=self.nbits,
             element_mode=self.element_mode,
@@ -558,18 +725,40 @@ class NeuralGraphEstimator:
         self._build_model()
         assert self.model_ is not None
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        criterion: nn.Module = nn.CrossEntropyLoss() if self.mode == "classification" else nn.MSELoss()
+        if self.mode == "classification":
+            class_weights = None
+            if isinstance(self.class_weight, str) and self.class_weight == "balanced":
+                counts = torch.bincount(y, minlength=int(self.num_classes or 0)).to(torch.float32)
+                class_weights = len(y) / (counts * int(self.num_classes or 1))
+            elif self.class_weight is not None:
+                class_weights_np = np.asarray(self.class_weight, dtype=np.float32)
+                if class_weights_np.shape != (int(self.num_classes or 0),) or not np.all(np.isfinite(class_weights_np)):
+                    raise ValueError("class_weight must contain one finite weight per class.")
+                if np.any(class_weights_np <= 0):
+                    raise ValueError("class weights must be positive.")
+                class_weights = torch.as_tensor(class_weights_np, dtype=torch.float32)
+            criterion: nn.Module = nn.CrossEntropyLoss(
+                weight=None if class_weights is None else class_weights.to(self.device)
+            )
+        else:
+            criterion = nn.MSELoss()
         n_samples = len(examples)
         indices = np.arange(n_samples)
         validation_count = int(n_samples * self.val_split)
         if validation_count >= n_samples:
             raise ValueError("val_split leaves no training examples.")
-        np.random.shuffle(indices)
+        if self.validation_seed is None:
+            np.random.shuffle(indices)
+        else:
+            np.random.RandomState(self.validation_seed).shuffle(indices)
         validation_indices = indices[:validation_count].tolist()
         training_indices = indices[validation_count:].tolist()
         if not training_indices:
             raise ValueError("Validation split leaves no training examples.")
         self.history_ = {"loss": [], "val_loss": []}
+        if self.mode == "classification":
+            self.history_["accuracy"] = []
+            self.history_["val_accuracy"] = []
         if self.verbose:
             print(
                 f"Training {len(training_indices)} graphs for up to {self.epochs} epochs "
@@ -578,6 +767,7 @@ class NeuralGraphEstimator:
             )
         best_state: Optional[Dict[str, Tensor]] = None
         best_loss = math.inf
+        best_validation_accuracy = -math.inf
         epochs_without_improvement = 0
 
         for epoch in range(self.epochs):
@@ -608,6 +798,8 @@ class NeuralGraphEstimator:
             train_loss = float(torch.stack(losses).mean().cpu()) if losses else math.nan
             train_accuracy = train_correct.item() / train_count if train_count else None
             self.history_["loss"].append(train_loss)
+            if train_accuracy is not None:
+                self.history_["accuracy"].append(train_accuracy)
             validation_loss: Optional[float] = None
             validation_accuracy: Optional[float] = None
             if validation_indices:
@@ -625,9 +817,18 @@ class NeuralGraphEstimator:
                     validation_loss = float(torch.stack(val_losses).mean().cpu())
                     if self.mode == "classification":
                         validation_accuracy = val_correct.item() / len(validation_indices)
+                        self.history_["val_accuracy"].append(validation_accuracy)
                     self.history_["val_loss"].append(validation_loss)
-                if validation_loss < best_loss:
+                if self.mode == "classification" and validation_accuracy is not None:
+                    improved = validation_accuracy > best_validation_accuracy or (
+                        validation_accuracy == best_validation_accuracy and validation_loss < best_loss
+                    )
+                else:
+                    improved = validation_loss < best_loss
+                if improved:
                     best_loss = validation_loss
+                    if validation_accuracy is not None:
+                        best_validation_accuracy = validation_accuracy
                     best_state = copy.deepcopy(self.model_.state_dict())
                     epochs_without_improvement = 0
                 else:
@@ -662,15 +863,17 @@ class NeuralGraphEstimator:
             embedding, prediction = self.model_(examples[start : start + self.batch_size])
             embeddings.append(embedding.cpu().numpy())
             predictions.append(prediction.cpu().numpy())
-        emb = np.concatenate(embeddings, axis=0) if embeddings else np.empty((0, self.global_d_model), np.float32)
+        embedding_dim = self.local_d_model if self.architecture == "gin" else self.global_d_model
+        emb = np.concatenate(embeddings, axis=0) if embeddings else np.empty((0, embedding_dim), np.float32)
         pred = np.concatenate(predictions, axis=0) if predictions else np.empty((0, 0), np.float32)
         return emb, pred
 
     def transform(self, graphs: Sequence[nx.Graph]) -> np.ndarray:
-        """Return graph-token embeddings with shape ``(n_graphs, global_d_model)``."""
+        """Return graph embeddings with shape ``(n_graphs, embedding_dim)``."""
         self._ensure_fitted()
+        embedding_dim = self.local_d_model if self.architecture == "gin" else self.global_d_model
         if not graphs:
-            return np.empty((0, self.global_d_model), dtype=np.float32)
+            return np.empty((0, embedding_dim), dtype=np.float32)
         examples = self._preprocess(graphs)
         embeddings, _ = self._predict_prepared(examples)
         return embeddings
@@ -705,6 +908,7 @@ class NeuralGraphEstimator:
             "decomposition_function": self.decomposition_function,
             "nbits": self.nbits,
             "element_mode": self.element_mode,
+            "architecture": self.architecture,
             "mode": self.mode,
             "num_classes": self._num_classes_param,
             "output_dim": self.output_dim,
@@ -721,9 +925,11 @@ class NeuralGraphEstimator:
             "batch_size": self.batch_size,
             "lr": self.lr,
             "weight_decay": self.weight_decay,
+            "class_weight": self.class_weight,
             "val_split": self.val_split,
             "early_stopping_patience": self.early_stopping_patience,
             "seed": self.seed,
+            "validation_seed": self.validation_seed,
             "device": self.device,
             "verbose": self.verbose,
         }
