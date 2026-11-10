@@ -375,10 +375,14 @@ class NeuralGraphEstimator:
             raise ValueError("val_split must be in [0, 1).")
 
     def _preprocess(self, graphs: Sequence[nx.Graph], *, fitting: bool = False) -> List[Dict[str, Any]]:
-        prepared = [
-            _graph_to_input(graph, self.decomposition_function, self.nbits, self.element_mode)
-            for graph in graphs
-        ]
+        if self.verbose and fitting:
+            print(f"Preparing {len(graphs)} training graphs...", flush=True)
+        prepared: List[Dict[str, Any]] = []
+        progress_interval = max(1, math.ceil(len(graphs) / 10))
+        for index, graph in enumerate(graphs, start=1):
+            prepared.append(_graph_to_input(graph, self.decomposition_function, self.nbits, self.element_mode))
+            if self.verbose and fitting and (index % progress_interval == 0 or index == len(graphs)):
+                print(f"Preprocessed {index}/{len(graphs)} graphs", flush=True)
         node_widths = [width for graph in prepared for width in graph["node_attribute_widths"]]
         edge_widths = [width for graph in prepared for width in graph["edge_attribute_widths"]]
         node_width = _infer_width(node_widths, "node")
@@ -489,6 +493,12 @@ class NeuralGraphEstimator:
         if not training_indices:
             raise ValueError("Validation split leaves no training examples.")
         self.history_ = {"loss": [], "val_loss": []}
+        if self.verbose:
+            print(
+                f"Training {len(training_indices)} graphs for up to {self.epochs} epochs "
+                f"({len(validation_indices)} validation graphs, batch_size={self.batch_size}, device={self.device})",
+                flush=True,
+            )
         best_state: Optional[Dict[str, Tensor]] = None
         best_loss = math.inf
         epochs_without_improvement = 0
@@ -497,26 +507,47 @@ class NeuralGraphEstimator:
             self.model_.train()
             np.random.shuffle(training_indices)
             losses: List[float] = []
-            for start in range(0, len(training_indices), self.batch_size):
+            train_correct = 0
+            train_count = 0
+            batch_starts = list(range(0, len(training_indices), self.batch_size))
+            progress_interval = max(1, math.ceil(len(batch_starts) / 5))
+            for batch_number, start in enumerate(batch_starts, start=1):
                 batch_indices = training_indices[start : start + self.batch_size]
                 optimizer.zero_grad(set_to_none=True)
                 _, prediction = self.model_([examples[index] for index in batch_indices])
-                loss = criterion(prediction, y[batch_indices])
+                batch_targets = y[batch_indices]
+                loss = criterion(prediction, batch_targets)
                 loss.backward()
                 optimizer.step()
                 losses.append(float(loss.detach().cpu()))
+                if self.mode == "classification":
+                    train_correct += int((prediction.detach().argmax(dim=1) == batch_targets).sum().item())
+                    train_count += len(batch_indices)
+                if self.verbose and (batch_number % progress_interval == 0 or batch_number == len(batch_starts)):
+                    progress = f"epoch {epoch + 1}/{self.epochs}, batch {batch_number}/{len(batch_starts)}"
+                    if self.mode == "classification":
+                        progress += f", train_accuracy={train_correct / train_count:.3f}"
+                    print(progress, flush=True)
             train_loss = float(np.mean(losses)) if losses else math.nan
+            train_accuracy = train_correct / train_count if train_count else None
             self.history_["loss"].append(train_loss)
             validation_loss: Optional[float] = None
+            validation_accuracy: Optional[float] = None
             if validation_indices:
                 self.model_.eval()
                 with torch.no_grad():
                     val_losses = []
+                    val_correct = 0
                     for start in range(0, len(validation_indices), self.batch_size):
                         batch_indices = validation_indices[start : start + self.batch_size]
                         _, prediction = self.model_([examples[index] for index in batch_indices])
-                        val_losses.append(float(criterion(prediction, y[batch_indices]).cpu()))
+                        batch_targets = y[batch_indices]
+                        val_losses.append(float(criterion(prediction, batch_targets).cpu()))
+                        if self.mode == "classification":
+                            val_correct += int((prediction.argmax(dim=1) == batch_targets).sum().item())
                     validation_loss = float(np.mean(val_losses))
+                    if self.mode == "classification":
+                        validation_accuracy = val_correct / len(validation_indices)
                     self.history_["val_loss"].append(validation_loss)
                 if validation_loss < best_loss:
                     best_loss = validation_loss
@@ -524,11 +555,21 @@ class NeuralGraphEstimator:
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
-                if self.early_stopping_patience is not None and epochs_without_improvement >= self.early_stopping_patience:
-                    break
             if self.verbose:
                 suffix = "" if validation_loss is None else f", val_loss={validation_loss:.4f}"
-                print(f"epoch {epoch + 1}/{self.epochs}: loss={train_loss:.4f}{suffix}")
+                if train_accuracy is not None:
+                    suffix += f", train_accuracy={train_accuracy:.3f}"
+                if validation_accuracy is not None:
+                    suffix += f", val_accuracy={validation_accuracy:.3f}"
+                print(f"epoch {epoch + 1}/{self.epochs}: loss={train_loss:.4f}{suffix}", flush=True)
+            if (
+                validation_indices
+                and self.early_stopping_patience is not None
+                and epochs_without_improvement >= self.early_stopping_patience
+            ):
+                if self.verbose:
+                    print(f"Early stopping after epoch {epoch + 1}.", flush=True)
+                break
         if best_state is not None:
             self.model_.load_state_dict(best_state)
         return self
