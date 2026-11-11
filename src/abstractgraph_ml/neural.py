@@ -256,6 +256,7 @@ class _HierarchicalGraphModel(nn.Module):
         global_num_layers: int,
         global_dim_feedforward: int,
         dropout: float,
+        embedding_dropout: float,
         output_dim: int,
     ) -> None:
         super().__init__()
@@ -265,6 +266,7 @@ class _HierarchicalGraphModel(nn.Module):
         self.global_d_model = global_d_model
         self.node_attribute_dim = node_attribute_dim
         self.edge_attribute_dim = edge_attribute_dim
+        self.embedding_dropout = nn.Dropout(embedding_dropout)
 
         self.interpretation_embedding = nn.Embedding(vocab_size, local_d_model, padding_idx=0)
         self.element_label_embedding = nn.Embedding(vocab_size, local_d_model, padding_idx=0)
@@ -303,7 +305,7 @@ class _HierarchicalGraphModel(nn.Module):
         values = self.element_label_embedding(labels)
         if self.node_attribute_projection is not None:
             values = values + self.node_attribute_projection(attributes)
-        return self.node_projection(values)
+        return self.embedding_dropout(self.node_projection(values))
 
     def _encode_interpretations(self, items: Sequence[Dict[str, Any]]) -> Tensor:
         """Encode a batch of ragged mapped subgraphs in parallel."""
@@ -375,7 +377,7 @@ class _HierarchicalGraphModel(nn.Module):
         has_elements = torch.as_tensor([count > 0 for count in counts], dtype=torch.bool, device=device)
         # MultiheadAttention cannot attend to an entirely masked row. Empty mapped
         # subgraphs get one harmless dummy key; its attention update is then zeroed.
-        summary = self.interpretation_embedding(item_labels).unsqueeze(1)
+        summary = self.embedding_dropout(self.interpretation_embedding(item_labels)).unsqueeze(1)
         for layer in self.local_layers:
             summary = layer(summary, elements, element_padding_mask, has_elements)
         return self.local_norm(summary[:, 0, :])
@@ -521,10 +523,15 @@ class NeuralGraphEstimator:
         global_num_layers: int = 2,
         global_dim_feedforward: int = 256,
         dropout: float = 0.1,
+        embedding_dropout: float = 0.0,
         epochs: int = 20,
         batch_size: int = 16,
         lr: float = 1e-3,
         weight_decay: float = 0.0,
+        lr_scheduler_patience: Optional[int] = None,
+        lr_scheduler_factor: float = 0.5,
+        lr_scheduler_min_lr: float = 1e-5,
+        label_smoothing: float = 0.0,
         class_weight: Optional[Union[Literal["balanced"], Sequence[float]]] = None,
         val_split: float = 0.0,
         early_stopping_patience: Optional[int] = None,
@@ -550,10 +557,15 @@ class NeuralGraphEstimator:
         self.global_num_layers = int(global_num_layers)
         self.global_dim_feedforward = int(global_dim_feedforward)
         self.dropout = float(dropout)
+        self.embedding_dropout = float(embedding_dropout)
         self.epochs = int(epochs)
         self.batch_size = int(batch_size)
         self.lr = float(lr)
         self.weight_decay = float(weight_decay)
+        self.lr_scheduler_patience = lr_scheduler_patience
+        self.lr_scheduler_factor = float(lr_scheduler_factor)
+        self.lr_scheduler_min_lr = float(lr_scheduler_min_lr)
+        self.label_smoothing = float(label_smoothing)
         self.class_weight = class_weight
         self.val_split = float(val_split)
         self.early_stopping_patience = early_stopping_patience
@@ -566,6 +578,8 @@ class NeuralGraphEstimator:
         self.node_attribute_dim_: Optional[int] = None
         self.edge_attribute_dim_: Optional[int] = None
         self.history_: Dict[str, List[float]] = {}
+        self.validation_targets_: Optional[np.ndarray] = None
+        self.validation_proba_: Optional[np.ndarray] = None
         self._validate_params()
 
     def _validate_params(self) -> None:
@@ -594,6 +608,16 @@ class NeuralGraphEstimator:
             raise ValueError("Transformer layer counts cannot be negative.")
         if self.epochs <= 0:
             raise ValueError("epochs must be positive.")
+        if self.lr_scheduler_patience is not None and self.lr_scheduler_patience < 0:
+            raise ValueError("lr_scheduler_patience must be non-negative or None.")
+        if not 0.0 < self.lr_scheduler_factor < 1.0:
+            raise ValueError("lr_scheduler_factor must be in (0, 1).")
+        if self.lr_scheduler_min_lr <= 0.0:
+            raise ValueError("lr_scheduler_min_lr must be positive.")
+        if not 0.0 <= self.label_smoothing < 1.0:
+            raise ValueError("label_smoothing must be in [0, 1).")
+        if not 0.0 <= self.embedding_dropout < 1.0:
+            raise ValueError("embedding_dropout must be in [0, 1).")
         if not 0.0 <= self.val_split < 1.0:
             raise ValueError("val_split must be in [0, 1).")
         if isinstance(self.class_weight, str) and self.class_weight != "balanced":
@@ -681,6 +705,7 @@ class NeuralGraphEstimator:
             global_num_layers=self.global_num_layers,
             global_dim_feedforward=self.global_dim_feedforward,
             dropout=self.dropout,
+            embedding_dropout=self.embedding_dropout,
             output_dim=int(output_dim),
         )
         self.model_ = model.to(self.device)
@@ -725,6 +750,15 @@ class NeuralGraphEstimator:
         self._build_model()
         assert self.model_ is not None
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        scheduler = None
+        if self.lr_scheduler_patience is not None:
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=self.lr_scheduler_factor,
+                patience=self.lr_scheduler_patience,
+                min_lr=self.lr_scheduler_min_lr,
+            )
         if self.mode == "classification":
             class_weights = None
             if isinstance(self.class_weight, str) and self.class_weight == "balanced":
@@ -738,7 +772,8 @@ class NeuralGraphEstimator:
                     raise ValueError("class weights must be positive.")
                 class_weights = torch.as_tensor(class_weights_np, dtype=torch.float32)
             criterion: nn.Module = nn.CrossEntropyLoss(
-                weight=None if class_weights is None else class_weights.to(self.device)
+                weight=None if class_weights is None else class_weights.to(self.device),
+                label_smoothing=self.label_smoothing,
             )
         else:
             criterion = nn.MSELoss()
@@ -751,11 +786,28 @@ class NeuralGraphEstimator:
             np.random.shuffle(indices)
         else:
             np.random.RandomState(self.validation_seed).shuffle(indices)
-        validation_indices = indices[:validation_count].tolist()
-        training_indices = indices[validation_count:].tolist()
+        if validation_count and self.mode == "classification":
+            # Keep every class represented in validation so early stopping and
+            # learning-rate scheduling are not driven by a skewed small split.
+            random_state = np.random.RandomState(self.validation_seed) if self.validation_seed is not None else None
+            validation_parts = []
+            for class_index in range(int(self.num_classes or 0)):
+                class_indices = np.flatnonzero(y.detach().cpu().numpy() == class_index)
+                if random_state is None:
+                    np.random.shuffle(class_indices)
+                else:
+                    random_state.shuffle(class_indices)
+                count = max(1, int(round(len(class_indices) * self.val_split)))
+                validation_parts.append(class_indices[:count])
+            validation_indices = np.concatenate(validation_parts).astype(int).tolist()
+            validation_set = set(validation_indices)
+            training_indices = [int(index) for index in indices if int(index) not in validation_set]
+        else:
+            validation_indices = indices[:validation_count].tolist()
+            training_indices = indices[validation_count:].tolist()
         if not training_indices:
             raise ValueError("Validation split leaves no training examples.")
-        self.history_ = {"loss": [], "val_loss": []}
+        self.history_ = {"loss": [], "val_loss": [], "learning_rate": []}
         if self.mode == "classification":
             self.history_["accuracy"] = []
             self.history_["val_accuracy"] = []
@@ -819,6 +871,8 @@ class NeuralGraphEstimator:
                         validation_accuracy = val_correct.item() / len(validation_indices)
                         self.history_["val_accuracy"].append(validation_accuracy)
                     self.history_["val_loss"].append(validation_loss)
+                    if scheduler is not None:
+                        scheduler.step(validation_loss)
                 if self.mode == "classification" and validation_accuracy is not None:
                     improved = validation_accuracy > best_validation_accuracy or (
                         validation_accuracy == best_validation_accuracy and validation_loss < best_loss
@@ -839,7 +893,12 @@ class NeuralGraphEstimator:
                     suffix += f", train_accuracy={train_accuracy:.3f}"
                 if validation_accuracy is not None:
                     suffix += f", val_accuracy={validation_accuracy:.3f}"
+                current_lr = float(optimizer.param_groups[0]["lr"])
+                self.history_["learning_rate"].append(current_lr)
+                suffix += f", lr={current_lr:.2g}"
                 print(f"epoch {epoch + 1}/{self.epochs}: loss={train_loss:.4f}{suffix}", flush=True)
+            else:
+                self.history_["learning_rate"].append(float(optimizer.param_groups[0]["lr"]))
             if (
                 validation_indices
                 and self.early_stopping_patience is not None
@@ -850,6 +909,16 @@ class NeuralGraphEstimator:
                 break
         if best_state is not None:
             self.model_.load_state_dict(best_state)
+        if validation_indices and self.mode == "classification":
+            self.model_.eval()
+            validation_probabilities = []
+            with torch.no_grad():
+                for start in range(0, len(validation_indices), self.batch_size):
+                    batch_indices = validation_indices[start : start + self.batch_size]
+                    _, prediction = self.model_([examples[index] for index in batch_indices])
+                    validation_probabilities.append(F.softmax(prediction, dim=1).cpu().numpy())
+            self.validation_targets_ = np.asarray(targets)[validation_indices]
+            self.validation_proba_ = np.concatenate(validation_probabilities, axis=0)
         return self
 
     @torch.no_grad()
@@ -921,10 +990,15 @@ class NeuralGraphEstimator:
             "global_num_layers": self.global_num_layers,
             "global_dim_feedforward": self.global_dim_feedforward,
             "dropout": self.dropout,
+            "embedding_dropout": self.embedding_dropout,
             "epochs": self.epochs,
             "batch_size": self.batch_size,
             "lr": self.lr,
             "weight_decay": self.weight_decay,
+            "lr_scheduler_patience": self.lr_scheduler_patience,
+            "lr_scheduler_factor": self.lr_scheduler_factor,
+            "lr_scheduler_min_lr": self.lr_scheduler_min_lr,
+            "label_smoothing": self.label_smoothing,
             "class_weight": self.class_weight,
             "val_split": self.val_split,
             "early_stopping_patience": self.early_stopping_patience,
