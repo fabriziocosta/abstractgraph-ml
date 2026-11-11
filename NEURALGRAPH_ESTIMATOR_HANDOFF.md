@@ -54,13 +54,14 @@ A 16-layer residual MLP on precomputed graph-hash vectors was explored in a diff
 
 - The notebook's original `NeuralGraphEstimator` config above is the starting point.
 - The direct graph-model comparisons available so far favor node mode over edge mode on the original holdout, but both node and edge modes trail the kernel in their available OOF comparisons.
-- There is no validated best hyperparameter configuration for `NeuralGraphEstimator` yet.
-- The unrelated residual-MLP mixup run was interrupted; the Jupyter kernel is idle and available for the estimator search.
+- There is no validated best hyperparameter configuration for `NeuralGraphEstimator` yet. A controlled nested search is underway across five configurations: compact hierarchical node, stronger-regularized node, wider/deeper node, compact edge, and three-layer GIN. It uses three inner folds, five outer folds, inner-selected thresholds, early stopping, and a matched RF on the same outer folds.
+- Completed fold 1: inner selection chose compact edge mode (best validation epochs 10, 39, and 33 across the inner folds). Outer score was 0.6776 accuracy / 0.7266 ROC AUC; matched RF scored 0.7320 / 0.7832. Fold 2 is running. Treat this as interim evidence only.
+- The unrelated residual-MLP mixup run was interrupted after three outer folds and is incomplete. The Jupyter kernel is now occupied by the `NeuralGraphEstimator` search above.
 - User instruction: skip TabPFN 2.6. No kernel/neural prediction blend.
 
 ## Next work
 
-1. Build a controlled search for `NeuralGraphEstimator` itself. Include hierarchical node/edge modes and the supported GIN architecture, then tune model width/layer counts, dropout, learning rate, weight decay, batch size, and training duration/early stopping.
+1. Finish the controlled search currently running. Based on its results, refine `NeuralGraphEstimator` hyperparameters (including width/layer counts, dropout, learning rate, weight decay, batch size, and early stopping) inside inner folds.
 2. Use inner folds for every configuration and threshold decision. Compare on the same stratified outer folds against the matched 300-tree RF. Track accuracy, ROC AUC, selected epoch, and train/validation gap.
 3. Keep the outer predictions untouched while selecting configurations. Re-evaluate the strongest candidate on fresh/repeated outer folds before calling it the best or claiming it beats the kernel.
 4. Update this handoff and the training notebook with results. Commit and sync both the `abstractgraph-ml` submodule and the ecosystem repository.
