@@ -14,6 +14,11 @@ selection utilities.
 For package layout, local setup, validation commands, and documentation index,
 see [docs/ORGANIZATION.md](docs/ORGANIZATION.md).
 
+## Zenodo
+
+Version 0.1.0: [10.5281/zenodo.24367239](https://doi.org/10.5281/zenodo.24367239)  
+All versions: [10.5281/zenodo.24367238](https://doi.org/10.5281/zenodo.24367238)
+
 ## Semantic Role
 
 `abstractgraph` defines graph representation and vectorization semantics.
