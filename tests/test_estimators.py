@@ -190,7 +190,7 @@ def _make_graph_label_repair_estimator(
     graph_estimator = GraphEstimator(
         transformer=_MaskedElementTransformer(),
         estimator=_LookupClassifier(),
-        manifold=None,
+        postprocessor=None,
     )
     return GraphLabelRepairEstimator(
         graph_estimator=graph_estimator,
@@ -256,7 +256,7 @@ class _IterativeContextClassifier:
 def test_graph_estimator_partial_fit_reuses_transformer_state() -> None:
     transformer = _CountingTransformer()
     estimator = _PartialFitRegressor()
-    graph_estimator = GraphEstimator(transformer=transformer, estimator=estimator, manifold=None)
+    graph_estimator = GraphEstimator(transformer=transformer, estimator=estimator, postprocessor=None)
 
     graph_estimator.partial_fit([1.0, 2.0], [0.1, 0.2])
     graph_estimator.partial_fit([3.0], [0.3])
@@ -277,7 +277,7 @@ def test_graph_estimator_partial_fit_reuses_transformer_state() -> None:
 def test_graph_estimator_partial_fit_replays_vectorized_batches_when_estimator_lacks_partial_fit() -> None:
     transformer = _CountingTransformer()
     estimator = _ReplayFitRegressor()
-    graph_estimator = GraphEstimator(transformer=transformer, estimator=estimator, manifold=None)
+    graph_estimator = GraphEstimator(transformer=transformer, estimator=estimator, postprocessor=None)
 
     graph_estimator.partial_fit([1.0, 2.0], [0.1, 0.2])
     graph_estimator.partial_fit([3.0], [0.3])
@@ -314,7 +314,7 @@ def test_graph_estimator_partial_fit_replays_vectorized_batches_when_estimator_l
 def test_graph_estimator_partial_fit_preserves_csr_replay_batches() -> None:
     transformer = _SparseCountingTransformer()
     estimator = _ReplayFitRegressor()
-    graph_estimator = GraphEstimator(transformer=transformer, estimator=estimator, manifold=None)
+    graph_estimator = GraphEstimator(transformer=transformer, estimator=estimator, postprocessor=None)
 
     graph_estimator.partial_fit([1.0, 2.0], [0.1, 0.2])
     graph_estimator.partial_fit([3.0], [0.3])
@@ -345,31 +345,30 @@ def test_graph_estimator_default_postprocessor_uses_truncated_svd_and_drops_firs
     graph_estimator.fit([1.0, 2.0, 3.0], [0.1, 0.2, 0.3])
 
     assert isinstance(graph_estimator.postprocessor_, DropFirstTruncatedSVD)
-    assert isinstance(graph_estimator.manifold_, DropFirstTruncatedSVD)
+    assert isinstance(graph_estimator.postprocessor_, DropFirstTruncatedSVD)
     transformed = graph_estimator.transform([1.0, 2.0, 3.0])
     assert transformed.shape == (3, 2)
 
 
-def test_graph_estimator_manifold_alias_sets_postprocessor() -> None:
-    transformer = _DenseThreeFeatureTransformer()
-    estimator = _ReplayFitRegressor()
+def test_graph_estimator_uses_configured_postprocessor() -> None:
+    postprocessor = DropFirstTruncatedSVD(n_components=2)
     graph_estimator = GraphEstimator(
-        transformer=transformer,
-        estimator=estimator,
-        manifold=DropFirstTruncatedSVD(n_components=2),
+        transformer=_DenseThreeFeatureTransformer(),
+        estimator=_ReplayFitRegressor(),
+        postprocessor=postprocessor,
     )
 
     graph_estimator.fit([1.0, 2.0, 3.0], [0.1, 0.2, 0.3])
 
     assert isinstance(graph_estimator.postprocessor_, DropFirstTruncatedSVD)
-    assert graph_estimator.manifold_ is graph_estimator.postprocessor_
+    assert graph_estimator.postprocessor_ is not postprocessor
 
 
 def test_graph_estimator_predict_proba_uses_binary_decision_function_fallback() -> None:
     graph_estimator = GraphEstimator(
         transformer=_CountingTransformer(),
         estimator=_BinaryDecisionEstimator(),
-        manifold=None,
+        postprocessor=None,
     )
     graph_estimator.fit([-1.0, 1.0], [0, 1])
 
@@ -386,7 +385,7 @@ def test_graph_estimator_predict_proba_uses_multiclass_decision_function_fallbac
     graph_estimator = GraphEstimator(
         transformer=_CountingTransformer(),
         estimator=_MulticlassDecisionEstimator(),
-        manifold=None,
+        postprocessor=None,
     )
     graph_estimator.fit([-1.0, 0.0, 1.0], ["a", "b", "c"])
 
@@ -404,7 +403,7 @@ def test_graph_estimator_preprocessor_fits_with_targets_before_estimator() -> No
         transformer=_DenseThreeFeatureTransformer(),
         estimator=estimator,
         preprocessor=preprocessor,
-        manifold=None,
+        postprocessor=None,
     )
 
     graph_estimator.fit([1.0, 2.0, 3.0], [0, 1, 1])
@@ -433,7 +432,7 @@ def test_graph_estimator_partial_fit_refits_preprocessor_on_replay() -> None:
         transformer=_DenseThreeFeatureTransformer(),
         estimator=estimator,
         preprocessor=preprocessor,
-        manifold=None,
+        postprocessor=None,
     )
 
     graph_estimator.partial_fit([1.0, 2.0], [0.1, 0.2])
@@ -476,7 +475,7 @@ def test_graph_label_repair_estimator_iterates_repaired_outputs() -> None:
     graph_estimator = GraphEstimator(
         transformer=_IterativeContextTransformer(),
         estimator=_IterativeContextClassifier(),
-        manifold=None,
+        postprocessor=None,
     )
     train_graph = nx.Graph()
     train_graph.add_node(0, label="A")

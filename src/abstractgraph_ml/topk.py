@@ -65,7 +65,7 @@ def _build_graph_estimator(
     return GraphEstimator(
         transformer=transformer,
         estimator=model,
-        manifold=base_estimator.manifold,
+        postprocessor=base_estimator.postprocessor,
         n_selected_features=base_estimator.n_selected_features,
     )
 

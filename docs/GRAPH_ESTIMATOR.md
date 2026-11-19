@@ -87,8 +87,6 @@ The default is a sparse-friendly truncated SVD helper,
 
 This step is used by `transform(...)`, not as the main predictive surface.
 
-`manifold` is still accepted as a backward-compatible alias for
-`postprocessor`, but new code should use `postprocessor`.
 
 ## Feature Selection
 

@@ -147,13 +147,10 @@ class GraphEstimator(BaseEstimator):
         is fit on the selected subset of features; otherwise on all raw
         features. The default postprocessor fits a sparse-friendly TruncatedSVD
         and returns components from the second onward.
-    manifold : Optional[Any], default None
-        Deprecated alias for ``postprocessor``. When both are provided,
-        ``postprocessor`` takes precedence.
     n_selected_features : Optional[int | float], default 0.1
         Controls optional feature selection based on the downstream estimator's
         importances/coefficients.
-        - ``None``: disables feature selection (legacy behavior).
+        - ``None``: disables feature selection.
         - ``int``: select exactly that many top features.
         - ``float`` in ``(0, 1)``: select that fraction of the input features
           (rounded to at least 1) as determined by the transformer's output
@@ -190,8 +187,6 @@ class GraphEstimator(BaseEstimator):
         Fitted copy of the preprocessor/transformer (if provided).
     postprocessor_ : Optional[Any]
         Fitted copy of the postprocessor/transformer (if provided).
-    manifold_ : Optional[Any]
-        Deprecated fitted alias for ``postprocessor_``.
     selected_feature_indices_ : Optional[np.ndarray]
         Array of column indices selected by feature selection, or ``None`` when
         selection is disabled or importances are unavailable.
@@ -214,7 +209,6 @@ class GraphEstimator(BaseEstimator):
         self,
         transformer: AbstractGraphTransformer,
         estimator: Optional[BaseEstimator] = None,
-        manifold: Optional[Any] = None,
         n_selected_features: Optional[Union[int, float]] = None,
         preprocessor: Optional[Any] = None,
         postprocessor: Optional[Any] = None,
@@ -224,7 +218,6 @@ class GraphEstimator(BaseEstimator):
         Args:
             transformer: Graph-to-feature transformer.
             estimator: Downstream estimator to fit on preprocessed features.
-            manifold: Deprecated alias for postprocessor.
             n_selected_features: Optional feature selection specification.
             preprocessor: Optional transformer applied before the estimator.
             postprocessor: Optional transformer applied after feature selection.
@@ -236,13 +229,7 @@ class GraphEstimator(BaseEstimator):
         self.estimator = estimator
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
-        self.manifold = (
-            manifold
-            if manifold is not None
-            else postprocessor
-            if postprocessor is not None
-            else DropFirstTruncatedSVD()
-        )
+        self.postprocessor = postprocessor
         # Optional feature selection based on downstream estimator importance
         # None disables selection. If int -> select exactly that many features.
         # If float in (0,1) -> fraction of input feature count.
@@ -336,7 +323,6 @@ class GraphEstimator(BaseEstimator):
             deepcopy(self.preprocessor) if self.preprocessor is not None else None
         )
         self.postprocessor_ = deepcopy(self._resolve_postprocessor())
-        self.manifold_ = self.postprocessor_
         self.selected_feature_indices_: Optional[np.ndarray] = None
         self.replay_raw_features_ = None
         self.replay_targets_ = None
@@ -390,8 +376,6 @@ class GraphEstimator(BaseEstimator):
     def _resolve_postprocessor(self):
         if self.postprocessor is not None:
             return self.postprocessor
-        if self.manifold is not None:
-            return self.manifold
         return DropFirstTruncatedSVD()
 
     def _append_replay_batch(self, raw_features: np.ndarray, targets: Optional[Any]) -> None:
