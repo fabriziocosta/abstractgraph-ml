@@ -16,8 +16,8 @@ see [docs/ORGANIZATION.md](docs/ORGANIZATION.md).
 
 ## Zenodo
 
-Version 0.1.0: [10.5281/zenodo.24367239](https://doi.org/10.5281/zenodo.24367239)  
-All versions: [10.5281/zenodo.24367238](https://doi.org/10.5281/zenodo.24367238)
+[![Version DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24367239.svg)](https://doi.org/10.5281/zenodo.24367239)
+[![All versions DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24367238.svg)](https://doi.org/10.5281/zenodo.24367238)
 
 ## Semantic Role
 
