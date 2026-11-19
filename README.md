@@ -1,3 +1,5 @@
+[![All versions DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24367238.svg)](https://doi.org/10.5281/zenodo.24367238)
+
 <p align="center">
   <img src="docs/assets/AG_Logo.png" alt="AbstractGraph logo" width="220">
 </p>
@@ -13,11 +15,6 @@ selection utilities.
 
 For package layout, local setup, validation commands, and documentation index,
 see [docs/ORGANIZATION.md](docs/ORGANIZATION.md).
-
-## Zenodo
-
-[![Version DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24367239.svg)](https://doi.org/10.5281/zenodo.24367239)
-[![All versions DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24367238.svg)](https://doi.org/10.5281/zenodo.24367238)
 
 ## Semantic Role
 
